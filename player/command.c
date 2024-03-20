@@ -3001,7 +3001,7 @@ static int mp_property_sub_pos(void *ctx, struct m_property *prop,
     struct MPOpts *opts = mpctx->opts;
     int track_ind = *(int *)prop->priv;
     if (action == M_PROPERTY_PRINT) {
-        *(char **)arg = talloc_asprintf(NULL, "%4.2f%%/100", opts->subs_shared->sub_pos[track_ind]);
+        *(char **)arg = talloc_asprintf(NULL, "%4.2f%", opts->subs_shared->sub_pos[track_ind]);
         return M_PROPERTY_OK;
     }
     return mp_property_generic_option(mpctx, prop, action, arg);
