@@ -74,6 +74,7 @@
 
 #include "osdep/io.h"
 #include "osdep/subprocess.h"
+#include "osdep/terminal.h"
 
 #include "core.h"
 
@@ -92,6 +93,8 @@ struct command_ctx {
 
     char **warned_deprecated;
     int num_warned_deprecated;
+
+    bool command_opts_processed;
 
     struct overlay *overlays;
     int num_overlays;
@@ -413,9 +416,9 @@ static int mp_property_playback_speed(void *ctx, struct m_property *prop,
                                       int action, void *arg)
 {
     MPContext *mpctx = ctx;
-    if (action == M_PROPERTY_PRINT) {
-        double speed = mpctx->opts->playback_speed;
-        *(char **)arg = talloc_asprintf(NULL, "%.2f", speed);
+    if (action == M_PROPERTY_PRINT || action == M_PROPERTY_FIXED_LEN_PRINT) {
+        *(char **)arg = mp_format_double(NULL, mpctx->opts->playback_speed, 2,
+                                         false, false, action != M_PROPERTY_FIXED_LEN_PRINT);
         return M_PROPERTY_OK;
     }
     return mp_property_generic_option(mpctx, prop, action, arg);
@@ -433,8 +436,9 @@ static int mp_property_av_speed_correction(void *ctx, struct m_property *prop,
     default: MP_ASSERT_UNREACHABLE();
     }
 
-    if (action == M_PROPERTY_PRINT) {
-        *(char **)arg = talloc_asprintf(NULL, "%+.3g%%", (val - 1) * 100);
+    if (action == M_PROPERTY_PRINT || action == M_PROPERTY_FIXED_LEN_PRINT) {
+        *(char **)arg = mp_format_double(NULL, (val - 1) * 100, 2, true,
+                                         true, action != M_PROPERTY_FIXED_LEN_PRINT);
         return M_PROPERTY_OK;
     }
 
@@ -666,13 +670,9 @@ static int mp_property_avsync(void *ctx, struct m_property *prop,
     MPContext *mpctx = ctx;
     if (!mpctx->ao_chain || !mpctx->vo_chain)
         return M_PROPERTY_UNAVAILABLE;
-    if (action == M_PROPERTY_PRINT) {
-        // Truncate anything < 1e-4 to avoid switching to scientific notation
-        if (fabs(mpctx->last_av_difference) < 1e-4) {
-            *(char **)arg = talloc_strdup(NULL, "0");
-        } else {
-            *(char **)arg = talloc_asprintf(NULL, "%+.2g", mpctx->last_av_difference);
-        }
+    if (action == M_PROPERTY_PRINT || action == M_PROPERTY_FIXED_LEN_PRINT) {
+        *(char **)arg = mp_format_double(NULL, mpctx->last_av_difference, 4,
+                                         true, false, action != M_PROPERTY_FIXED_LEN_PRINT);
         return M_PROPERTY_OK;
     }
     return m_property_double_ro(action, arg, mpctx->last_av_difference);
@@ -2886,6 +2886,23 @@ static int mp_property_osd_ass(void *ctx, struct m_property *prop,
     return m_property_read_sub(props, action, arg);
 }
 
+static int mp_property_term_size(void *ctx, struct m_property *prop,
+                                  int action, void *arg)
+{
+    int w = -1, h = -1;
+    terminal_get_size(&w, &h);
+    if (w == -1 || h == -1)
+        return M_PROPERTY_UNAVAILABLE;
+
+    struct m_sub_property props[] = {
+        {"w",      SUB_PROP_INT(w)},
+        {"h",      SUB_PROP_INT(h)},
+        {0}
+    };
+
+    return m_property_read_sub(props, action, arg);
+}
+
 static int mp_property_mouse_pos(void *ctx, struct m_property *prop,
                                     int action, void *arg)
 {
@@ -3736,8 +3753,9 @@ static int do_op_udata(struct udata_ctx* ctx, int action, void *arg)
         assert(node);
         m_option_copy(&udata_type, arg, node);
         return M_PROPERTY_OK;
+    case M_PROPERTY_FIXED_LEN_PRINT:
     case M_PROPERTY_PRINT: {
-        char *str = m_option_pretty_print(&udata_type, node);
+        char *str = m_option_pretty_print(&udata_type, node, action == M_PROPERTY_FIXED_LEN_PRINT);
         *(char **)arg = str;
         return str != NULL;
     }
@@ -3844,7 +3862,7 @@ static int do_list_udata(int item, int action, void *arg, void *ctx)
 {
     struct udata_ctx nctx = *(struct udata_ctx*)ctx;
     nctx.node = &nctx.node->u.list->values[item];
-    nctx.ta_parent = &nctx.node->u.list;
+    nctx.ta_parent = nctx.node->u.list;
 
     return do_op_udata(&nctx, action, arg);
 }
@@ -3870,7 +3888,7 @@ static int mp_property_udata(void *ctx, struct m_property *prop,
         .mpctx = mpctx,
         .path = path,
         .node = &mpctx->command_ctx->udata,
-        .ta_parent = &mpctx->command_ctx,
+        .ta_parent = mpctx->command_ctx,
     };
 
     int ret = do_op_udata(&nctx, action, arg);
@@ -4092,6 +4110,7 @@ static const struct m_property mp_properties_base[] = {
     {"input-bindings", mp_property_bindings},
 
     {"user-data", mp_property_udata},
+    {"term-size", mp_property_term_size},
 
     M_PROPERTY_ALIAS("video", "vid"),
     M_PROPERTY_ALIAS("audio", "aid"),
@@ -5563,6 +5582,19 @@ static void cmd_expand_path(void *p)
     };
 }
 
+static void cmd_escape_ass(void *p)
+{
+    struct mp_cmd_ctx *cmd = p;
+    bstr dst = {0};
+
+    osd_mangle_ass(&dst, cmd->args[0].v.s, true);
+
+    cmd->result = (mpv_node){
+        .format = MPV_FORMAT_STRING,
+        .u.string = dst.len ? (char *)dst.start : talloc_strdup(NULL, ""),
+    };
+}
+
 static struct load_action get_load_action(struct MPContext *mpctx, int action_flag)
 {
     switch (action_flag) {
@@ -6660,6 +6692,8 @@ const struct mp_cmd_def mp_cmds[] = {
         .is_noisy = true },
     { "expand-path", cmd_expand_path, { {"text", OPT_STRING(v.s)} },
         .is_noisy = true },
+    { "escape-ass", cmd_escape_ass, { {"text", OPT_STRING(v.s)} },
+        .is_noisy = true },
     { "show-progress", cmd_show_progress, .allow_auto_repeat = true,
         .is_noisy = true },
 
@@ -7129,6 +7163,27 @@ void handle_command_updates(struct MPContext *mpctx)
 
     // Depends on polling demuxer wakeup callback notifications.
     cache_dump_poll(mpctx);
+
+    // Potentially run the commands now (idle) instead of waiting for a file to load.
+    if (mpctx->stop_play == PT_STOP)
+        run_command_opts(mpctx);
+}
+
+void run_command_opts(struct MPContext *mpctx)
+{
+    struct MPOpts *opts = mpctx->opts;
+    struct command_ctx *ctx = mpctx->command_ctx;
+
+    if (!opts->input_commands || ctx->command_opts_processed)
+        return;
+
+    // Take easy way out and add these to the input queue.
+    for (int i = 0; opts->input_commands[i]; i++) {
+        struct mp_cmd *cmd = mp_input_parse_cmd(mpctx->input, bstr0(opts->input_commands[i]),
+                                                "the command line");
+        mp_input_queue_cmd(mpctx->input, cmd);
+    }
+    ctx->command_opts_processed = true;
 }
 
 void mp_notify(struct MPContext *mpctx, int event, void *arg)
@@ -7265,6 +7320,11 @@ void mp_option_change_callback(void *ctx, struct m_config_option *co, int flags,
     if (opt_ptr == &opts->vo->android_surface_size) {
         if (mpctx->video_out)
             vo_control(mpctx->video_out, VOCTRL_EXTERNAL_RESIZE, NULL);
+    }
+
+    if (opt_ptr == &opts->input_commands) {
+        mpctx->command_ctx->command_opts_processed = false;
+        run_command_opts(mpctx);
     }
 
     if (opt_ptr == &opts->playback_speed) {
