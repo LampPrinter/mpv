@@ -500,12 +500,12 @@ class Window: NSWindow, NSWindowDelegate {
     @objc func setDoubleWindowSize() { setWindowScale(2.0) }
 
     func setWindowScale(_ scale: Double) {
-        input?.command("set window-scale \(scale)")
+        input?.command("set current-window-scale \(scale)")
     }
 
     func addWindowScale(_ scale: Double) {
         if !isInFullscreen {
-            input?.command("add window-scale \(scale)")
+            input?.command("add current-window-scale \(scale)")
         }
     }
 
