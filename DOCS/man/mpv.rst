@@ -227,12 +227,10 @@ Alt+BACKSPACE
     Reset the pan/zoom settings.
 
 F8
-    Show the playlist and the current position in it (useful only if a UI window
-    is used, broken on the terminal).
+    Show the playlist and the current position in it.
 
 F9
-    Show the list of audio and subtitle streams (useful only if a UI window  is
-    used, broken on the terminal).
+    Show the list of audio and subtitle streams.
 
 i and I
     Show/toggle an overlay displaying statistics about the currently playing
@@ -991,7 +989,7 @@ There are three choices for using mpv from other programs or scripts:
        addition, terminal behavior itself may change any time. Compatibility
        cannot be guaranteed.
 
-       Your code should work even if you pass ``--no-terminal``. Do not attempt
+       Your code should work even if you pass ``--terminal=no``. Do not attempt
        to simulate user input by sending terminal control codes to mpv's stdin.
        If you need interactive control, using ``--input-ipc-server`` is
        recommended. This gives you access to the `JSON IPC`_  over unix domain
@@ -1115,7 +1113,7 @@ this with ``--untimed``, but it will likely break, unless the stream has no
 audio, and the input feeds data to the player at a constant rate.
 
 Another common problem is with MJPEG streams. These do not signal the correct
-framerate. Using ``--untimed`` or ``--no-correct-pts --container-fps-override=60``
+framerate. Using ``--untimed`` or ``--correct-pts=no --container-fps-override=60``
 might help.
 
 For livestreams, data can build up due to pausing the stream, due to slightly

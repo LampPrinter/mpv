@@ -47,15 +47,15 @@ local o = {
     plot_color = "FFFFFF",
 
     -- Text style
-    font = "sans-serif",
+    font = "",
     font_mono = "monospace",   -- monospaced digits are sufficient
     font_size = 8,
-    font_color = "FFFFFF",
+    font_color = "",
     border_size = 0.8,
-    border_color = "262626",
+    border_color = "",
     shadow_x_offset = 0.0,
     shadow_y_offset = 0.0,
-    shadow_color = "000000",
+    shadow_color = "",
     alpha = "11",
 
     -- Custom header for ASS tags to style the text output.
@@ -158,13 +158,26 @@ local function text_style()
     if o.custom_header and o.custom_header ~= "" then
         return o.custom_header
     else
-        local has_shadow = mp.get_property('osd-back-color'):sub(2, 3) == '00'
-        return format("{\\r\\an7\\fs%d\\fn%s\\bord%f\\3c&H%s&" ..
-                      "\\1c&H%s&\\1a&H%s&\\3a&H%s&" ..
-                      (has_shadow and "\\4a&H%s&\\xshad%f\\yshad%f\\4c&H%s&}" or "}"),
-                      o.font_size, o.font, o.border_size,
-                      o.border_color, o.font_color, o.alpha, o.alpha, o.alpha,
-                      o.shadow_x_offset, o.shadow_y_offset, o.shadow_color)
+        local style = "{\\r\\an7\\fs" .. o.font_size .. "\\bord" .. o.border_size
+
+        if o.font ~= "" then
+            style = style .. "\\fn" .. o.font
+        end
+
+        if o.font_color ~= "" then
+            style = style .. "\\1c&H" .. o.font_color .. "&\\1a&H" .. o.alpha .. "&"
+        end
+
+        if o.border_color ~= "" then
+            style = style .. "\\3c&H" .. o.border_color .. "&\\3a&H" .. o.alpha .. "&"
+        end
+
+        if o.shadow_color ~= "" then
+            style = style .. "\\4c&H" .. o.shadow_color .. "&\\4a&H" .. o.alpha .. "&"
+        end
+
+        return style .. "\\xshad" .. o.shadow_x_offset ..
+               "\\yshad" .. o.shadow_y_offset .. "}"
     end
 end
 
@@ -891,12 +904,11 @@ local function add_video(s)
         return
     end
 
-    local osd_dims = mp.get_property_native("osd-dimensions")
-    local scaled_width = osd_dims["w"] - osd_dims["ml"] - osd_dims["mr"]
-    local scaled_height = osd_dims["h"] - osd_dims["mt"] - osd_dims["mb"]
-
     append(s, "", {prefix=o.nl .. o.nl .. "Video:", nl="", indent=""})
-    if append_property(s, "video-codec", {prefix_sep="", nl="", indent=""}) then
+    local track = mp.get_property_native("current-tracks/video")
+    if track and append(s, track["codec-desc"], {prefix_sep="", nl="", indent=""}) then
+        append(s, track["codec-profile"], {prefix="[", nl="", indent=" ", prefix_sep="",
+               no_prefix_markup=true, suffix="]"})
         append_property(s, "hwdec-current", {prefix="HW:", nl="",
                         indent=o.prefix_sep .. o.prefix_sep,
                         no_prefix_markup=false, suffix=""}, {no=true, [""]=true})
@@ -945,11 +957,16 @@ local function add_audio(s)
     local merge = function(r, ro, prop)
         local a = r[prop] or ro[prop]
         local b = ro[prop] or r[prop]
-        return (a == b or a == nil) and a or (a .. " → " .. b)
+        return (a == b or a == nil) and a or (a .. " ➜ " .. b)
     end
 
     append(s, "", {prefix=o.nl .. o.nl .. "Audio:", nl="", indent=""})
-    append_property(s, "audio-codec", {prefix_sep="", nl="", indent=""})
+    local track = mp.get_property_native("current-tracks/audio")
+    if track then
+        append(s, track["codec-desc"], {prefix_sep="", nl="", indent=""})
+        append(s, track["codec-profile"], {prefix="[", nl="", indent=" ", prefix_sep="",
+               no_prefix_markup=true, suffix="]"})
+    end
     append_property(s, "current-ao", {prefix="AO:", nl="",
                                       indent=o.prefix_sep .. o.prefix_sep})
     local dev = append_property(s, "audio-device", {prefix="Device:"})
@@ -1096,7 +1113,7 @@ local function vo_stats()
     add_header(header)
     append_perfdata(header, content, true, true)
     header = {table.concat(header)}
-    return finalize_page(header, content, false)
+    return finalize_page(header, content, true)
 end
 
 local kbinfo_lines = nil
