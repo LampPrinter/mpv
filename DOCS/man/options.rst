@@ -3397,7 +3397,10 @@ Window
 ``--window-scale=<factor>``
     Resize the video window to a multiple (or fraction) of the video size. This
     option is applied before ``--autofit`` and other options are applied (so
-    they override this option).
+    they override this option). Changing this option while the window is
+    maximized can unmaximize the window depending on the OS and window manager.
+    If the window does not unmaximize, the multiplier will be applied if the user
+    unmaximizes the window later.
 
     For example, ``--window-scale=0.5`` would show the window at half the
     video size.
@@ -6385,13 +6388,15 @@ them.
 ``--gpu-sw``
     Continue even if a software renderer is detected.
 
-``--gpu-context=<sys>``
-    The value ``auto`` (the default) selects the GPU context. You can also pass
-    ``help`` to get a complete list of compiled in backends (sorted by
-    autoprobe order).
+``--gpu-context=<context1,context2,...[,]>``
+    Specify a priority list of the GPU contexts to be used.
+    The value ``auto`` (the default) selects the GPU context with the default autoprobe
+    order. You can also pass ``help`` to get a complete list of compiled in backends
+    (sorted by the default autoprobe order).
 
     auto
-        auto-select (default)
+        auto-select (default). Note that this context must be used alone and
+        does not participate in the priority list.
     win
         Win32/WGL
     winvk

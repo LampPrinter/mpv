@@ -35,6 +35,9 @@ UP      Scroll one line up
 DOWN    Scroll one line down
 ====   ==================
 
+Page 4 also binds ``/`` to search for input bindings by typing part of a binding
+or command.
+
 Configuration
 -------------
 
@@ -62,6 +65,8 @@ Configurable Options
     Default: UP
 ``key_scroll_down``
     Default: DOWN
+``key_scroll_search``
+    Default: /
 ``scroll_lines``
     Default: 1
 
@@ -178,6 +183,11 @@ Configurable Options
 
     Border color used for drawing graphs.
 
+``plot_bg_border_width``
+    Default: 0.5
+
+    Border width used for drawing graphs.
+
 ``plot_bg_color``
     Default: 262626
 
@@ -187,6 +197,12 @@ Configurable Options
     Default: FFFFFF
 
     Color used for drawing graphs.
+
+``vidscale``
+    Default: yes
+
+    Scale the text and graphs with the video.
+    ``no`` tries to keep the sizes constant.
 
 Note: colors are given as hexadecimal values and use ASS tag order: BBGGRR
 (blue green red).
