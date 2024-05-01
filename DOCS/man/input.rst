@@ -2711,11 +2711,11 @@ Property list
     are the GDI names (\\.\DISPLAY1, \\.\DISPLAY2, etc.) and the first display
     in the list will be the one that Windows considers associated with the
     window (as determined by the MonitorFromWindow API.) On macOS these are the
-    Display Product Names as used in the System Information and only one display
-    name is returned since a window can only be on one screen. On Wayland, these
-    are the wl_output names if protocol version >= 4 is used
-    (LVDS-1, HDMI-A-1, X11-1, etc.), or the wl_output model reported by the
-    geometry event if protocol version < 4 is used.
+    Display Product Names as used in the System Information with a serial number
+    in brackets and only one display name is returned since a window can only be
+    on one screen. On Wayland, these are the wl_output names if protocol
+    version >= 4 is used (LVDS-1, HDMI-A-1, X11-1, etc.), or the wl_output model
+    reported by the geometry event if protocol version < 4 is used.
 
 ``display-fps``
     The refresh rate of the current display. Currently, this is the lowest FPS
@@ -2823,19 +2823,27 @@ Property list
     stripped. If the subtitle is not text-based (i.e. DVD/BD subtitles), an
     empty string is returned.
 
-``sub-text-ass``
-    Like ``sub-text``, but return the text in ASS format. Text subtitles in
-    other formats are converted. For native ASS subtitles, events that do
-    not contain any text (but vector drawings etc.) are not filtered out. If
-    multiple events match with the current playback time, they are concatenated
-    with line breaks. Contains only the "Text" part of the events.
+    This has sub-properties for different formats:
 
-    This property is not enough to render ASS subtitles correctly, because ASS
-    header and per-event metadata are not returned. You likely need to do
-    further filtering on the returned string to make it useful.
+    ``sub-text/ass``
+        Like ``sub-text``, but return the text in ASS format. Text subtitles in
+        other formats are converted. For native ASS subtitles, events that do
+        not contain any text (but vector drawings etc.) are not filtered out. If
+        multiple events match with the current playback time, they are concatenated
+        with line breaks. Contains only the "Text" part of the events.
+
+        This property is not enough to render ASS subtitles correctly, because ASS
+        header and per-event metadata are not returned. Use ``/ass-full`` for that.
+
+    ``sub-text/ass-full``
+        Like ``sub-text-ass``, but return the full event with all fields, formatted as
+        lines in a .ass text file. Use with ``sub-ass-extradata`` for style information.
+
+``sub-text-ass`` (deprecated)
+    Deprecated alias for ``sub-text/ass``.
 
 ``secondary-sub-text``
-    Same as ``sub-text``, but for the secondary subtitles.
+    Same as ``sub-text`` (with the same sub-properties), but for the secondary subtitles.
 
 ``sub-start``
     The current subtitle start time (in seconds). If there's multiple current

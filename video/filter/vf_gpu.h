@@ -15,21 +15,21 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#if !swift(>=5.0)
-extension Data {
-    mutating func withUnsafeMutableBytes<Type>(_ body: (UnsafeMutableRawBufferPointer) throws -> Type) rethrows -> Type {
-        let dataCount = count
-        return try withUnsafeMutableBytes { (ptr: UnsafeMutablePointer<UInt8>) throws -> Type in
-            try body(UnsafeMutableRawBufferPointer(start: ptr, count: dataCount))
-        }
-    }
-}
-#endif
+#pragma once
 
-#if !swift(>=4.2)
-extension NSDraggingInfo {
-    var draggingPasteboard: NSPasteboard {
-        return draggingPasteboard()
-    }
-}
-#endif
+#include "common/common.h"
+#include "common/global.h"
+
+struct offscreen_ctx {
+    struct mp_log *log;
+    struct ra *ra;
+    void *priv;
+
+    void (*set_context)(struct offscreen_ctx *ctx, bool enable);
+};
+
+struct offscreen_context {
+    const char *api;
+    struct offscreen_ctx *(*offscreen_ctx_create)(struct mpv_global *,
+                                                  struct mp_log *);
+};

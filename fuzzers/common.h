@@ -15,21 +15,28 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#if !swift(>=5.0)
-extension Data {
-    mutating func withUnsafeMutableBytes<Type>(_ body: (UnsafeMutableRawBufferPointer) throws -> Type) rethrows -> Type {
-        let dataCount = count
-        return try withUnsafeMutableBytes { (ptr: UnsafeMutablePointer<UInt8>) throws -> Type in
-            try body(UnsafeMutableRawBufferPointer(start: ptr, count: dataCount))
-        }
-    }
-}
-#endif
+#pragma once
 
-#if !swift(>=4.2)
-extension NSDraggingInfo {
-    var draggingPasteboard: NSPasteboard {
-        return draggingPasteboard()
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MPV_STRINGIFY_(X) #X
+#define MPV_STRINGIFY(X) MPV_STRINGIFY_(X)
+
+static inline void check_error(int status)
+{
+    if (status < 0) {
+        fprintf(stderr, "mpv API error: %s\n", mpv_error_string(status));
+        exit(1);
     }
 }
-#endif
+
+static inline bool str_startswith(const char *str, size_t str_len,
+                                  const char *prefix, size_t prefix_len)
+{
+    if (str_len < prefix_len)
+        return false;
+    return !memcmp(str, prefix, prefix_len);
+}
