@@ -21,7 +21,6 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <string.h>
-#include <strings.h>
 #include <errno.h>
 #include <assert.h>
 
@@ -41,6 +40,7 @@
 
 #include "audio/chmap_avchannel.h"
 
+#include "common/common.h"
 #include "common/msg.h"
 #include "common/tags.h"
 #include "common/av_common.h"
@@ -796,6 +796,9 @@ static void handle_new_stream(demuxer_t *demuxer, int i)
             MP_VERBOSE(demuxer, "Found Dolby Vision config record: profile "
                        "%d level %d\n", cfg->dv_profile, cfg->dv_level);
             av_format_inject_global_side_data(avfc);
+            sh->codec->dovi = true;
+            sh->codec->dv_profile = cfg->dv_profile;
+            sh->codec->dv_level = cfg->dv_level;
         }
 
         // This also applies to vfw-muxed mkv, but we can't detect these easily.

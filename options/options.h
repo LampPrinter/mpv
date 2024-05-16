@@ -56,6 +56,7 @@ typedef struct mp_vo_opts {
     bool keepaspect_window;
     bool hidpi_window_scale;
     bool native_fs;
+    bool native_touch;
     bool show_in_taskbar;
 
     int64_t WinID;
@@ -174,6 +175,7 @@ typedef struct MPOpts {
     bool lua_load_stats;
     bool lua_load_console;
     int lua_load_auto_profiles;
+    bool lua_load_select;
 
     bool auto_load_scripts;
 
