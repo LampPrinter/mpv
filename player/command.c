@@ -388,7 +388,7 @@ static char *cut_osd_list(struct MPContext *mpctx, char *text, int pos)
 
 static char *format_delay(double time)
 {
-    return talloc_asprintf(NULL, "%d ms", (int)lrint(time * 1000));
+    return talloc_asprintf(NULL, "%.f ms", time * 1000);
 }
 
 // Property-option bridge. (Maps the property to the option with the same name.)
@@ -791,10 +791,10 @@ static int mp_property_percent_pos(void *ctx, struct m_property *prop,
         };
         return M_PROPERTY_OK;
     case M_PROPERTY_PRINT: {
-        int pos = get_percent_pos(mpctx);
+        double pos = get_current_pos_ratio(mpctx, false);
         if (pos < 0)
             return M_PROPERTY_UNAVAILABLE;
-        *(char **)arg = talloc_asprintf(NULL, "%d", pos);
+        *(char **)arg = talloc_asprintf(NULL, "%.f", pos * 100);
         return M_PROPERTY_OK;
     }
     }
@@ -820,7 +820,7 @@ static int mp_property_time_pos(void *ctx, struct m_property *prop,
         queue_seek(mpctx, MPSEEK_ABSOLUTE, *(double *)arg, MPSEEK_DEFAULT, 0);
         return M_PROPERTY_OK;
     }
-    return property_time(action, arg, get_current_time(mpctx));
+    return property_time(action, arg, get_playback_time(mpctx));
 }
 
 /// Current audio pts in seconds (R)
@@ -1670,7 +1670,7 @@ static int mp_property_volume(void *ctx, struct m_property *prop,
         };
         return M_PROPERTY_OK;
     case M_PROPERTY_PRINT:
-        *(char **)arg = talloc_asprintf(NULL, "%i", (int)opts->softvol_volume);
+        *(char **)arg = talloc_asprintf(NULL, "%.f", opts->softvol_volume);
         return M_PROPERTY_OK;
     }
 
@@ -3262,8 +3262,10 @@ static int mp_property_playlist(void *ctx, struct m_property *prop,
 
         for (int n = 0; n < pl->num_entries; n++) {
             struct playlist_entry *e = pl->entries[n];
+            res =  talloc_strdup_append(res, pl->current == e ? list_current
+                                                              : list_normal);
             char *p = e->title;
-            if (!p) {
+            if (!p || mpctx->opts->playlist_entry_name > 0) {
                 p = e->filename;
                 if (!mp_is_url(bstr0(p))) {
                     char *s = mp_basename(e->filename);
@@ -3271,8 +3273,11 @@ static int mp_property_playlist(void *ctx, struct m_property *prop,
                         p = s;
                 }
             }
-            const char *m = pl->current == e ? list_current : list_normal;
-            res = talloc_asprintf_append(res, "%s%s\n", m, p);
+            if (!e->title || p == e->title || mpctx->opts->playlist_entry_name == 1) {
+                res = talloc_asprintf_append(res, "%s\n", p);
+            } else {
+                res = talloc_asprintf_append(res, "%s (%s)\n", e->title, p);
+            }
         }
 
         *(char **)arg =
@@ -3372,7 +3377,7 @@ static int mp_property_packet_bitrate(void *ctx, struct m_property *prop,
     if (action == M_PROPERTY_PRINT) {
         rate /= 1000;
         if (rate < 1000) {
-            *(char **)arg = talloc_asprintf(NULL, "%d kbps", (int)rate);
+            *(char **)arg = talloc_asprintf(NULL, "%.f kbps", rate);
         } else {
             *(char **)arg = talloc_asprintf(NULL, "%.3f Mbps", rate / 1000.0);
         }
@@ -6342,7 +6347,8 @@ static void cmd_script_binding(void *p)
         target = space;
         name = sep + 1;
     }
-    char state[3] = {'p', incmd->is_mouse_button ? 'm' : '-'};
+    char state[4] = {'p', incmd->is_mouse_button ? 'm' : '-',
+                          incmd->canceled ? 'c' : '-'};
     if (incmd->is_up_down)
         state[0] = incmd->repeated ? 'r' : (incmd->is_up ? 'u' : 'd');
     event.num_args = 5;

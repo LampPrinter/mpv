@@ -46,6 +46,7 @@
 #include "video/hwdec.h"
 #include "video/image_writer.h"
 #include "sub/osd.h"
+#include "sub/sd.h"
 #include "player/core.h"
 #include "player/command.h"
 #include "stream/stream.h"
@@ -99,6 +100,7 @@ extern const struct m_sub_options macos_conf;
 extern const struct m_sub_options wayland_conf;
 extern const struct m_sub_options wingl_conf;
 extern const struct m_sub_options vaapi_conf;
+extern const struct m_sub_options egl_conf;
 
 static const struct m_sub_options screenshot_conf = {
     .opts = image_writer_opts,
@@ -362,10 +364,18 @@ const struct m_sub_options mp_subtitle_shared_sub_opts = {
         {"sub-visibility", OPT_BOOL(sub_visibility[0])},
         {"secondary-sub-visibility", OPT_BOOL(sub_visibility[1])},
         {"sub-ass-override", OPT_CHOICE(ass_style_override[0],
-            {"no", 0}, {"yes", 1}, {"force", 3}, {"scale", 4}, {"strip", 5}),
+            {"no", ASS_STYLE_OVERRIDE_NONE},
+            {"yes", ASS_STYLE_OVERRIDE_YES},
+            {"scale", ASS_STYLE_OVERRIDE_SCALE},
+            {"force", ASS_STYLE_OVERRIDE_FORCE},
+            {"strip", ASS_STYLE_OVERRIDE_STRIP}),
             .flags = UPDATE_SUB_HARD},
         {"secondary-sub-ass-override", OPT_CHOICE(ass_style_override[1],
-            {"no", 0}, {"yes", 1}, {"force", 3}, {"scale", 4}, {"strip", 5}),
+            {"no", ASS_STYLE_OVERRIDE_NONE},
+            {"yes", ASS_STYLE_OVERRIDE_YES},
+            {"scale", ASS_STYLE_OVERRIDE_SCALE},
+            {"force", ASS_STYLE_OVERRIDE_FORCE},
+            {"strip", ASS_STYLE_OVERRIDE_STRIP}),
             .flags = UPDATE_SUB_HARD},
         {0}
     },
@@ -374,8 +384,8 @@ const struct m_sub_options mp_subtitle_shared_sub_opts = {
         .sub_visibility[0] = true,
         .sub_visibility[1] = true,
         .sub_pos[0] = 100,
-        .ass_style_override[0] = 1,
-        .ass_style_override[1] = 5,
+        .ass_style_override[0] = ASS_STYLE_OVERRIDE_SCALE,
+        .ass_style_override[1] = ASS_STYLE_OVERRIDE_STRIP,
     },
     .change_flags = UPDATE_OSD,
 };
@@ -853,6 +863,9 @@ static const m_option_t mp_opts[] = {
     {"osd-msg2", OPT_STRING(osd_msg[1]), .flags = UPDATE_OSD},
     {"osd-msg3", OPT_STRING(osd_msg[2]), .flags = UPDATE_OSD},
 
+    {"osd-playlist-entry", OPT_CHOICE(playlist_entry_name,
+        {"title", 0}, {"filename", 1}, {"both", 2})},
+
     {"video-osd", OPT_BOOL(video_osd), .flags = UPDATE_OSD},
 
     {"idle", OPT_CHOICE(player_idle_mode,
@@ -889,6 +902,10 @@ static const m_option_t mp_opts[] = {
 
 #if HAVE_GL
     {"", OPT_SUBSTRUCT(opengl_opts, opengl_conf)},
+#endif
+
+#if HAVE_EGL || HAVE_EGL_ANDROID || HAVE_EGL_ANGLE_WIN32
+    {"egl", OPT_SUBSTRUCT(egl_opts, egl_conf)},
 #endif
 
 #if HAVE_VULKAN

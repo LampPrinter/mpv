@@ -57,8 +57,9 @@ struct sd_ass_priv {
     struct mp_osd_res osd;
     struct seen_packet *seen_packets;
     int num_seen_packets;
-    bool *packets_animated;
+    int *packets_animated;
     int num_packets_animated;
+    bool check_animated;
     bool duration_unknown;
 };
 
@@ -284,49 +285,49 @@ static int init(struct sd *sd)
 
     ctx->packer = mp_ass_packer_alloc(ctx);
 
+    // Subtitles does not have any profile value, so put the converted type as a profile.
+    const char **desc = ctx->converter ? &sd->codec->codec_profile : &sd->codec->codec_desc;
+    switch (ctx->ass_track->track_type) {
+    case TRACK_TYPE_ASS:
+        *desc = "Advanced Sub Station Alpha";
+        break;
+    case TRACK_TYPE_SSA:
+        *desc = "Sub Station Alpha";
+        break;
+    }
+
     return 0;
 }
 
 // Check if subtitle has events that would cause it to be animated inside {}
-static bool is_animated(char *s)
+static bool is_animated(const char *str)
 {
-    bool in_tag = false;
-    bool valid_event = false;
-    bool valid_tag = false;
-    while (*s) {
-        if (!in_tag && s[0] == '{')
-            in_tag = true;
-        if (s[0] == '\\') {
-            s++;
-            if (!s[0])
-                break;
-            if (s[0] == 'k' || s[0] == 'K' || s[0] == 't') {
-                valid_event = true;
-                continue;
-            // just bruteforce the multi-letter ones
-            } else if (s[0] == 'f') {
-                if (!strncmp(s, "fad", 3)) {
-                    valid_event = true;
-                    continue;
-                }
-            } else if (s[0] == 'm') {
-                if (!strncmp(s, "move", 4)) {
-                    valid_event = true;
-                    continue;
-                }
+    const char *begin = str;
+    while ((str = strchr(str, '{'))) {
+        if (str++ > begin && str[-2] == '\\')
+            continue;
+
+        const char *end = strchr(str, '}');
+        if (!end)
+            return false;
+
+        while ((str = memchr(str, '\\', end - str))) {
+            while (str[0] == '\\')
+                ++str;
+            while (str[0] == ' ' || str[0] == '\t')
+                ++str;
+            if (str[0] == 'k' || str[0] == 'K' || str[0] == 't' ||
+                (str[0] == 'f' && str[1] == 'a' && str[2] == 'd') ||
+                (str[0] == 'm' && str[1] == 'o' && str[2] == 'v' && str[3] == 'e'))
+            {
+                return true;
             }
         }
-        if (in_tag && valid_event && s[0] == '}') {
-            valid_tag = true;
-            break;
-        } else if (s[0] == '}') {
-            in_tag = false;
-            valid_event = false;
-            valid_tag = false;
-        }
-        s++;
+
+        str = end + 1;
     }
-    return valid_tag;
+
+    return false;
 }
 
 // Note: pkt is not necessarily a fully valid refcounted packet.
@@ -351,19 +352,32 @@ static void filter_and_add(struct sd *sd, struct demux_packet *pkt)
                       llrint(pkt->pts * 1000),
                       llrint(pkt->duration * 1000));
 
-    // This bookkeeping is only ever needed for ASS subs
+    // This bookkeeping only has any practical use for ASS subs
+    // over a VO with no video.
     if (!ctx->is_converted) {
         if (!pkt->seen) {
             for (int n = track->n_events - 1; n >= 0; n--) {
-                if (n + 1 == old_n_events || pkt->animated)
+                if (n + 1 == old_n_events || pkt->animated == 1)
                     break;
                 ASS_Event *event = &track->events[n];
-                pkt->animated = (event->Effect && event->Effect[0]) ||
-                                 is_animated(event->Text);
+                // Might as well mark pkt->animated here with effects if we can.
+                pkt->animated = (event->Effect && event->Effect[0]) ? 1 : -1;
+                if (ctx->check_animated && pkt->animated != 1)
+                    pkt->animated = is_animated(event->Text);
             }
             MP_TARRAY_APPEND(ctx, ctx->packets_animated, ctx->num_packets_animated, pkt->animated);
         } else {
-            pkt->animated = ctx->packets_animated[pkt->seen_pos];
+            if (ctx->check_animated && ctx->packets_animated[pkt->seen_pos] == -1) {
+                for (int n = track->n_events - 1; n >= 0; n--) {
+                    if (n + 1 == old_n_events || pkt->animated == 1)
+                        break;
+                    ASS_Event *event = &track->events[n];
+                    ctx->packets_animated[pkt->seen_pos] = is_animated(event->Text);
+                    pkt->animated = ctx->packets_animated[pkt->seen_pos];
+                }
+            } else {
+                pkt->animated = ctx->packets_animated[pkt->seen_pos];
+            }
         }
     }
 
@@ -476,7 +490,7 @@ static void configure_ass(struct sd *sd, struct mp_osd_res *dim,
     bool set_scale_by_window = true;
     bool total_override = false;
     // With forced overrides, apply the --sub-* specific options
-    if (converted || shared_opts->ass_style_override[sd->order] == 3) { // 'force'
+    if (converted || shared_opts->ass_style_override[sd->order] == ASS_STYLE_OVERRIDE_FORCE) {
         set_scale_with_window = opts->sub_scale_with_window;
         set_use_margins = opts->sub_use_margins;
         set_scale_by_window = opts->sub_scale_by_window;
@@ -489,6 +503,8 @@ static void configure_ass(struct sd *sd, struct mp_osd_res *dim,
         set_sub_pos = 100.0f - shared_opts->sub_pos[sd->order];
         set_line_spacing = opts->ass_line_spacing;
         set_hinting = opts->ass_hinting;
+    }
+    if (total_override || shared_opts->ass_style_override[sd->order] == ASS_STYLE_OVERRIDE_SCALE) {
         set_font_scale = opts->sub_scale;
     }
     if (set_scale_with_window) {
@@ -506,7 +522,7 @@ static void configure_ass(struct sd *sd, struct mp_osd_res *dim,
     int set_force_flags = 0;
     if (total_override)
         set_force_flags |= ASS_OVERRIDE_BIT_STYLE | ASS_OVERRIDE_BIT_SELECTIVE_FONT_SCALE;
-    if (shared_opts->ass_style_override[sd->order] == 4) // 'scale'
+    if (shared_opts->ass_style_override[sd->order] == ASS_STYLE_OVERRIDE_SCALE)
         set_force_flags |= ASS_OVERRIDE_BIT_SELECTIVE_FONT_SCALE;
     if (converted)
         set_force_flags |= ASS_OVERRIDE_BIT_ALIGNMENT;
@@ -587,7 +603,8 @@ static long long find_timestamp(struct sd *sd, double pts)
 
     long long ts = llrint(pts * 1000);
 
-    if (!sd->opts->sub_fix_timing || sd->shared_opts->ass_style_override[sd->order] == 0)
+    if (!sd->opts->sub_fix_timing ||
+        sd->shared_opts->ass_style_override[sd->order] == ASS_STYLE_OVERRIDE_NONE)
         return ts;
 
     // Try to fix small gaps and overlaps.
@@ -650,7 +667,8 @@ static struct sub_bitmaps *get_bitmaps(struct sd *sd, struct mp_osd_res dim,
     struct sd_ass_priv *ctx = sd->priv;
     struct mp_subtitle_opts *opts = sd->opts;
     struct mp_subtitle_shared_opts *shared_opts = sd->shared_opts;
-    bool no_ass = !opts->ass_enabled || shared_opts->ass_style_override[sd->order] == 5;
+    bool no_ass = !opts->ass_enabled ||
+        shared_opts->ass_style_override[sd->order] == ASS_STYLE_OVERRIDE_STRIP;
     bool converted = (ctx->is_converted && !lavc_conv_is_styled(ctx->converter)) || no_ass;
     ASS_Track *track = no_ass ? ctx->shadow_track : ctx->ass_track;
     ASS_Renderer *renderer = ctx->ass_renderer;
@@ -948,6 +966,9 @@ static int control(struct sd *sd, enum sd_ctrl cmd, void *arg)
         a[0] += res / 1000.0 + SUB_SEEK_OFFSET;
         return true;
     }
+    case SD_CTRL_SET_ANIMATED_CHECK:
+        ctx->check_animated = *(bool *)arg;
+        return CONTROL_OK;
     case SD_CTRL_SET_VIDEO_PARAMS:
         ctx->video_params = *(struct mp_image_params *)arg;
         return CONTROL_OK;

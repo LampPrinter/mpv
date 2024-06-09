@@ -487,7 +487,7 @@ Remember to quote string arguments in input.conf (see `Flat command syntax`_).
     ``insert-at-play`` actions. When used with those actions, the new item will
     be inserted at the index position in the playlist, or appended to the end if
     index is less than 0 or greater than the size of the playlist. This argument
-    will be ignored for all other actions.
+    will be ignored for all other actions. This argument is added in mpv 0.38.0.
 
     The fourth argument is a list of options and values which should be set
     while the file is playing. It is of the form ``opt1=value1,opt2=value2,..``.
@@ -495,6 +495,14 @@ Remember to quote string arguments in input.conf (see `Flat command syntax`_).
     table), however the values themselves must be strings currently. These
     options are set during playback, and restored to the previous value at end
     of playback (see `Per-File Options`_).
+
+    .. warning::
+
+        Since mpv 0.38.0, an insertion index argument is added as the third argument.
+        This breaks all existing uses of this command which make use of the argument
+        to include the list of options to be set while the file is playing. To address
+        this problem, the third argument now needs to be set to -1 if the fourth
+        argument needs to be used.
 
 ``loadlist <url> [<flags> [<index>]]``
     Load the given playlist file or URL (like ``--playlist``).
@@ -1336,13 +1344,16 @@ Input Commands that are Possibly Subject to Change
     key with a letter is normally not emitted as having a modifier, and results
     in upper case text instead, but some backends may mess up).
 
-    The key state consists of 2 characters:
+    The key state consists of 3 characters:
 
     1. One of ``d`` (key was pressed down), ``u`` (was released), ``r`` (key
        is still down, and was repeated; only if key repeat is enabled for this
        binding), ``p`` (key was pressed; happens if up/down can't be tracked).
     2. Whether the event originates from the mouse, either ``m`` (mouse button)
        or ``-`` (something else).
+    3. Whether the event results from a cancellation (e.g. the key is logically
+       released but not physically released), either ``c`` (canceled) or ``-``
+       (something else). Not all types of cancellations set this flag.
 
     Future versions can add more arguments and more key state characters to
     support more input peculiarities.
@@ -1818,6 +1829,9 @@ prefixes can be specified. They are separated by whitespace.
     This prefix forces enabling key repeat in any case. For a list of commands:
     the first command determines the repeatability of the whole list (up to and
     including version 0.33 - a list was always repeatable).
+``nonrepeatable``
+    For some commands, keeping a key pressed runs the command repeatedly.
+    This prefix forces disabling key repeat in any case.
 ``async``
     Allow asynchronous execution (if possible). Note that only a few commands
     will support this (usually this is explicitly documented). Some commands
@@ -2099,9 +2113,10 @@ Property list
 
 ``audio-pts``
     Current audio playback position in current file in seconds. Unlike time-pos,
-    this updates more often than once per frame. For audio-only files, it is
-    mostly equivalent to time-pos, while for video-only files this property is
-    not available.
+    this updates more often than once per frame. This is mostly equivalent to
+    time-pos for audio-only files however it also takes into account the audio
+    driver delay. This can lead to negative values in certain cases, so in
+    general you probably want to simply use time-pos.
 
     This has a sub-property:
 
@@ -3056,7 +3071,7 @@ Property list
         Total number of tracks.
 
     ``track-list/N/id``
-        The ID as it's used for ``-sid``/``--aid``/``--vid``. This is unique
+        The ID as it's used for ``--sid``/``--aid``/``--vid``. This is unique
         within tracks of the same type (sub/audio/video), but otherwise not.
 
     ``track-list/N/type``

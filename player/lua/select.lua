@@ -27,10 +27,20 @@ end
 
 mp.add_forced_key_binding(nil, "select-playlist", function ()
     local playlist = {}
-    local default_item = 1
+    local default_item
+    local show = mp.get_property_native("osd-playlist-entry")
 
     for i, entry in ipairs(mp.get_property_native("playlist")) do
-        playlist[i] = select(2, utils.split_path(entry.filename))
+        playlist[i] = entry.title
+        if not playlist[i] or show ~= "title" then
+            playlist[i] = entry.filename
+            if not playlist[i]:find("://") then
+                playlist[i] = select(2, utils.split_path(playlist[i]))
+            end
+        end
+        if entry.title and show == "both" then
+            playlist[i] = string.format("%s (%s)", entry.title, playlist[i])
+        end
 
         if entry.playing then
             default_item = i
@@ -61,7 +71,8 @@ local function format_track(track)
             (track["demux-w"] and track["demux-w"] .. "x" .. track["demux-h"]
              .. " " or "") ..
             (track["demux-fps"] and not track.image
-             and string.format("%.3f", track["demux-fps"]) .. " fps " or "") ..
+             and string.format("%.4f", track["demux-fps"]):gsub("%.?0*$", "") ..
+             " fps " or "") ..
             (track["demux-channel-count"] and track["demux-channel-count"] ..
              " ch " or "") ..
             (track["codec-profile"] and track.type == "audio"
@@ -100,7 +111,7 @@ end)
 local function select_track(property, type, prompt, error)
     local tracks = {}
     local items = {}
-    local default_item = 1
+    local default_item
     local track_id = mp.get_property_native(property)
 
     for _, track in ipairs(mp.get_property_native("track-list")) do
@@ -148,13 +159,17 @@ mp.add_forced_key_binding(nil, "select-vid", function ()
                  "No available video tracks.")
 end)
 
-local function format_time(t)
+local function format_time(t, duration)
     local h = math.floor(t / (60 * 60))
     t = t - (h * 60 * 60)
     local m = math.floor(t / 60)
     local s = t - (m * 60)
 
-    return string.format("%.2d:%.2d:%.2d", h, m, s)
+    if duration >= 60 * 60 or h > 0 then
+        return string.format("%.2d:%.2d:%.2d", h, m, s)
+    end
+
+    return string.format("%.2d:%.2d", m, s)
 end
 
 mp.add_forced_key_binding(nil, "select-chapter", function ()
@@ -166,8 +181,10 @@ mp.add_forced_key_binding(nil, "select-chapter", function ()
         return
     end
 
+    local duration = mp.get_property_native("duration", math.huge)
+
     for i, chapter in ipairs(mp.get_property_native("chapter-list")) do
-        chapters[i] = format_time(chapter.time) .. " " .. chapter.title
+        chapters[i] = format_time(chapter.time, duration) .. " " .. chapter.title
     end
 
     input.select({
@@ -188,42 +205,55 @@ mp.add_forced_key_binding(nil, "select-subtitle-line", function ()
         return
     end
 
+    if sub.external and sub["external-filename"]:find("^edl://") then
+        sub["external-filename"] = sub["external-filename"]:match('https?://.*')
+                                   or sub["external-filename"]
+    end
+
     local r = mp.command_native({
         name = "subprocess",
         capture_stdout = true,
         args = sub.external
-            and {"ffmpeg", "-loglevel", "quiet", "-i", sub["external-filename"],
+            and {"ffmpeg", "-loglevel", "error", "-i", sub["external-filename"],
                  "-f", "lrc", "-map_metadata", "-1", "-fflags", "+bitexact", "-"}
-            or {"ffmpeg", "-loglevel", "quiet", "-i", mp.get_property("path"),
+            or {"ffmpeg", "-loglevel", "error", "-i", mp.get_property("path"),
                 "-map", "s:" .. sub["id"] - 1, "-f", "lrc", "-map_metadata",
                 "-1", "-fflags", "+bitexact", "-"}
     })
 
-    if r.status < 0 then
-        show_error("subprocess error: " .. r.error_string)
+    if r.error_string == "init" then
+        show_error("Failed to extract subtitles: ffmpeg not found.")
         return
-    end
-
-    if r.status > 0 then
-        show_error("ffmpeg failed with code " .. r.status)
+    elseif r.status ~= 0 then
+        show_error("Failed to extract subtitles.")
         return
     end
 
     local sub_lines = {}
-    local default_item = 1
-
-    local sub_start = mp.get_property_native("sub-start", 0)
-    local m = math.floor(sub_start / 60)
-    local s = sub_start - m * 60
-    sub_start = string.format("%.2d:%05.2f", m, s)
+    local sub_times = {}
+    local default_item
+    local sub_start = mp.get_property_native("sub-start",
+                                             mp.get_property_native("time-pos"))
+    local duration = mp.get_property_native("duration", math.huge)
 
     -- Strip HTML and ASS tags.
     for line in r.stdout:gsub("<.->", ""):gsub("{\\.-}", ""):gmatch("[^\n]+") do
-        sub_lines[#sub_lines + 1] = line:sub(2):gsub("]", " ", 1)
+        -- ffmpeg outputs LRCs with minutes > 60 instead of adding hours.
+        sub_times[#sub_times + 1] = line:match("%d+") * 60 + line:match(":([%d%.]*)")
+        sub_lines[#sub_lines + 1] = format_time(sub_times[#sub_times], duration) ..
+                                    " " .. line:gsub(".*]", "", 1)
 
-        if line:find("^" .. sub_start) then
-            default_item = #sub_lines
+        if sub_times[#sub_times] <= sub_start then
+            default_item = #sub_times
         end
+    end
+
+    -- Handle sub-start of embedded subs being slightly earlier than
+    -- ffmpeg's timestamps.
+    sub_start = mp.get_property_native("sub-start")
+    if sub_start and default_item and sub_times[default_item] < sub_start and
+       sub_lines[default_item + 1] then
+        default_item = default_item + 1
     end
 
     input.select({
@@ -231,7 +261,11 @@ mp.add_forced_key_binding(nil, "select-subtitle-line", function ()
         items = sub_lines,
         default_item = default_item,
         submit = function (index)
-            mp.commandv("seek", sub_lines[index]:match("%S*"), "absolute")
+            -- Add an offset to seek to the correct line while paused without a
+            -- video track.
+            local offset = mp.get_property_native("current-tracks/video/image") == false
+                           and 0 or .09
+            mp.commandv("seek", sub_times[index] + offset, "absolute")
         end,
     })
 end)
@@ -243,7 +277,7 @@ mp.add_forced_key_binding(nil, "select-audio-device", function ()
     -- otherwise its value is just auto and there is no current-audio-device
     -- property.
     local selected_device = mp.get_property("audio-device")
-    local default_item = 1
+    local default_item
 
     if #devices == 0 then
         show_error("No available audio devices.")

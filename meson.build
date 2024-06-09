@@ -4,6 +4,7 @@ project('mpv',
         version: files('./VERSION'),
         meson_version: '>=0.62.0',
         default_options: [
+            'backend_max_links=16',
             'buildtype=debugoptimized',
             'b_lundef=false',
             'c_std=c11',
@@ -265,41 +266,33 @@ cc = meson.get_compiler('c')
 flags = ['-D_FILE_OFFSET_BITS=64']
 link_flags = []
 
-test_flags = ['-Werror=implicit-function-declaration',
-              '-Wno-missing-field-initializers',
-              '-Wno-sign-compare',
-              '-Wno-unused-parameter',
-              '-Wno-cast-function-type',
+test_flags = ['-Wdisabled-optimization',
               '-Wempty-body',
-              '-Wdisabled-optimization',
-              '-Wstrict-prototypes',
-              '-Wno-format-zero-length',
-              '-Wno-redundant-decls',
-              '-Wvla',
-              '-Wno-format-truncation',
+              '-Wformat',
               '-Wimplicit-fallthrough',
-              '-fno-math-errno']
+              '-Wmissing-prototypes',
+              '-Wparentheses',
+              '-Wpointer-arith',
+              '-Wshadow',
+              '-Wstrict-prototypes',
+              '-Wundef',
+              '-Wvla',
+              '-Werror=implicit-function-declaration',
+              '-Wno-cast-function-type',
+              '-Wno-format-zero-length',
+              '-Wno-missing-field-initializers',
+              '-Wno-pointer-sign',
+              '-Wno-sign-compare',
+              '-Wno-switch',
+              '-Wno-unused-parameter',
+              '-fno-math-errno',
+              '-fno-signed-zeros',
+              '-fno-trapping-math']
 
 flags += cc.get_supported_arguments(test_flags)
 
 if cc.has_multi_arguments('-Wformat', '-Werror=format-security')
-    flags += ['-Wformat', '-Werror=format-security']
-endif
-
-if cc.get_id() == 'gcc'
-    gcc_flags = ['-Wundef', '-Wmissing-prototypes', '-Wshadow',
-                 '-Wno-switch', '-Wparentheses', '-Wpointer-arith',
-                 '-Wno-pointer-sign',
-                 # GCC bug 66425
-                 '-Wno-unused-result']
-    flags += gcc_flags
-endif
-
-if cc.get_id() == 'clang'
-    clang_flags = ['-Wno-logical-op-parentheses', '-Wno-switch',
-                   '-Wno-tautological-compare', '-Wno-pointer-sign',
-                   '-Wno-tautological-constant-out-of-range-compare']
-    flags += clang_flags
+    flags += '-Werror=format-security'
 endif
 
 darwin = host_machine.system() == 'darwin'
@@ -411,9 +404,9 @@ endif
 if posix
     path_source = files('osdep/path-unix.c')
     if cc.has_function('fork', prefix : '#include <unistd.h>')
-        subprocess_source = files('osdep/subprocess-posix.c')
+        sources += files('osdep/subprocess-posix.c')
     else
-        subprocess_source = files('osdep/subprocess-dummy.c')
+        sources += files('osdep/subprocess-dummy.c')
     endif
     sources += files('input/ipc-unix.c',
                      'osdep/poll_wrapper.c',
@@ -437,6 +430,8 @@ endif
 
 features += {'ppoll': cc.has_function('ppoll', args: '-D_GNU_SOURCE',
                                       prefix: '#include <poll.h>')}
+features += {'memrchr': cc.has_function('memrchr', args: '-D_GNU_SOURCE',
+                                        prefix: '#include <string.h>')}
 
 cd_devices = {
     'windows': 'D:',
@@ -485,7 +480,6 @@ features += {'uwp': uwp.found()}
 if features['uwp']
     dependencies += uwp
     path_source = files('osdep/path-uwp.c')
-    subprocess_source = []
 endif
 
 features += {'win32-executable': win32 and get_option('cplayer')}
@@ -513,9 +507,9 @@ if features['win32-desktop']
                           cc.find_library('version')]
     dependencies += win32_desktop_libs
     path_source = files('osdep/path-win.c')
-    subprocess_source = files('osdep/subprocess-win.c')
     sources += files('input/ipc-win.c',
                      'osdep/language-win.c',
+                     'osdep/subprocess-win.c',
                      'osdep/terminal-win.c',
                      'video/out/w32_common.c',
                      'video/out/win32/displayconfig.c',
@@ -525,8 +519,8 @@ if features['win32-desktop']
 endif
 
 if not posix and not features['win32-desktop']
-    subprocess_source = files('osdep/subprocess-dummy.c')
     sources += files('input/ipc-dummy.c',
+                     'osdep/subprocess-dummy.c',
                      'osdep/terminal-dummy.c')
 endif
 
@@ -572,7 +566,7 @@ vector = get_option('vector').require(
 )
 features += {'vector': vector.allowed()}
 
-sources += path_source + subprocess_source + timer_source
+sources += path_source + timer_source
 
 
 # various file generations
@@ -580,6 +574,7 @@ tools_directory = join_paths(source_root, 'TOOLS')
 docutils_wrapper = find_program(join_paths(tools_directory, 'docutils-wrapper.py'))
 file2string = find_program(join_paths(tools_directory, 'file2string.py'))
 matroska = find_program(join_paths(tools_directory, 'matroska.py'))
+mpv_desktop = find_program(join_paths(tools_directory, 'gen-mpv-desktop.py'))
 
 ebml_defs = custom_target('ebml_defs.inc',
     output: 'ebml_defs.inc',
@@ -1310,7 +1305,8 @@ if features['vulkan'] and features['x11']
      sources += files('video/out/vulkan/context_xlib.c')
 endif
 
-features += {'vk-khr-display': cc.has_function('vkCreateDisplayPlaneSurfaceKHR', prefix: '#include <vulkan/vulkan_core.h>',
+features += {'vk-khr-display': vulkan.type_name() == 'internal' or
+                               cc.has_function('vkCreateDisplayPlaneSurfaceKHR', prefix: '#include <vulkan/vulkan_core.h>',
                                                dependencies: [vulkan])}
 if features['vk-khr-display']
     sources += files('video/out/vulkan/context_display.c')
@@ -1794,7 +1790,6 @@ if get_option('cplayer')
     zsh_install_dir = join_paths(datadir, 'zsh', 'site-functions')
     install_data('etc/_mpv.zsh', install_dir: zsh_install_dir, rename: '_mpv')
 
-    install_data('etc/mpv.desktop', install_dir: join_paths(datadir, 'applications'))
     install_data('etc/mpv.metainfo.xml', install_dir: join_paths(datadir, 'metainfo'))
     install_data('etc/encoding-profiles.conf', install_dir: join_paths(confdir, 'mpv'))
 
@@ -1824,6 +1819,21 @@ if get_option('cplayer')
             output: 'mpv.app',
             command: [osxbundle, mpv.full_path(), '@SOURCE_ROOT@'],
         )
+    endif
+
+    if not win32 and not darwin
+        if meson.can_run_host_binaries()
+            mpv_desktop_path = join_paths(source_root, 'etc', 'mpv.desktop')
+            custom_target('mpv.desktop',
+                depends: mpv,
+                output: 'mpv.desktop',
+                command: [mpv_desktop, mpv_desktop_path, mpv.full_path(), '@OUTPUT@'],
+                install: true,
+                install_dir: join_paths(datadir, 'applications'),
+            )
+        else
+            install_data('etc/mpv.desktop', install_dir: join_paths(datadir, 'applications'))
+        endif
     endif
 endif
 

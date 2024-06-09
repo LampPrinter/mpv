@@ -767,8 +767,15 @@ static void update_playback_state(struct vo_w32_state *w32)
         return;
     }
 
+    ULONGLONG completed = pstate->position;
+    ULONGLONG total = UINT8_MAX;
+    if (!pstate->position) {
+        completed = 1;
+        total = MAXULONGLONG;
+    }
+
     ITaskbarList3_SetProgressValue(w32->taskbar_list3, w32->window,
-                                   pstate->percent_pos, 100);
+                                   completed, total);
     ITaskbarList3_SetProgressState(w32->taskbar_list3, w32->window,
                                    pstate->paused ? TBPF_PAUSED :
                                                     TBPF_NORMAL);
@@ -1745,6 +1752,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
         if (wParam == WM_CREATE) {
             // Default to alphanumeric input when the IME is first initialized.
             set_ime_conversion_mode(w32, IME_CMODE_ALPHANUMERIC);
+            KillTimer(w32->window, (UINT_PTR)WM_CREATE);
             return 0;
         }
         break;
