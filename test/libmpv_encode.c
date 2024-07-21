@@ -94,17 +94,15 @@ static void check_output(FILE *fp)
     if (size < 100)
         fail("did not encode anything\n");
 
-    char magic[4] = {0};
+    char magic[4];
     fseek(fp, 0, SEEK_SET);
-    fread(magic, sizeof(magic), 1, fp);
+    size_t ret = fread(magic, sizeof(magic), 1, fp);
     static const char ebml_magic[] = {26, 69, 223, 163};
-    if (memcmp(magic, ebml_magic, 4) != 0)
+    if (ret != 1 || memcmp(magic, ebml_magic, sizeof(magic)) != 0)
         fail("output was not Matroska\n");
 
     puts("output file ok");
 }
-
-int mp_mkostemps(char *template, int suffixlen, int flags);
 
 int main(int argc, char *argv[])
 {
@@ -115,9 +113,17 @@ int main(int argc, char *argv[])
         return 1;
 
     static char path[] = "./testout.XXXXXX";
-    out_path = mktemp(path);
+
+#ifdef _WIN32
+    out_path = _mktemp(path);
     if (!out_path || !*out_path)
         fail("tmpfile failed\n");
+#else
+    int fd = mkstemp(path);
+    if (fd == -1)
+        fail("tmpfile failed\n");
+    out_path = path;
+#endif
 
     check_api_error(mpv_set_option_string(ctx, "o", out_path));
     check_api_error(mpv_set_option_string(ctx, "of", "matroska"));

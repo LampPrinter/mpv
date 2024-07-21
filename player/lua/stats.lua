@@ -348,7 +348,7 @@ local function append_perfdata(header, s, dedicated_page)
         end
         -- Calculate font weight. 100 is minimum, 400 is normal, 700 bold, 900 is max
         local w = (700 * math.sqrt(i)) + 200
-        return format("{\\b%d}%2d%%{\\b0}", w, i * 100)
+        return format("{\\b%d}%3d%%{\\b0}", w, i * 100)
     end
 
     -- ensure that the fixed title is one element and every scrollable line is
@@ -372,7 +372,7 @@ local function append_perfdata(header, s, dedicated_page)
                 s[#s+1] = format(f, o.nl, o.indent, o.indent,
                                  o.font_mono, pp(pass["last"]),
                                  pp(pass["avg"]), pp(pass["peak"]),
-                                 o.prefix_sep .. "\\h\\h", p(pass["last"], last_s[frame]),
+                                 o.prefix_sep .. "\\h", p(pass["last"], last_s[frame]),
                                  o.font, o.prefix_sep, o.prefix_sep, pass["desc"])
 
                 if o.plot_perfdata and o.use_ass then
@@ -402,8 +402,8 @@ end
 -- command prefix tokens to strip - includes generic property commands
 local cmd_prefixes = {
     osd_auto=1, no_osd=1, osd_bar=1, osd_msg=1, osd_msg_bar=1, raw=1, sync=1,
-    async=1, expand_properties=1, repeatable=1, set=1, add=1, multiply=1,
-    toggle=1, cycle=1, cycle_values=1, ["!reverse"]=1, change_list=1,
+    async=1, expand_properties=1, repeatable=1, nonrepeatable=1, set=1, add=1,
+    multiply=1, toggle=1, cycle=1, cycle_values=1, ["!reverse"]=1, change_list=1,
 }
 -- commands/writable-properties prefix sub-words (followed by -) to strip
 local name_prefixes = {
@@ -952,9 +952,10 @@ local function add_video(s)
         return
     end
 
-    append(s, "", {prefix="Video:", nl=o.nl .. o.nl, indent=""})
     local track = mp.get_property_native("current-tracks/video")
-    if track and append(s, track["codec-desc"], {prefix_sep="", nl="", indent=""}) then
+    if track then
+        append(s, "", {prefix=track.image and "Image:" or "Video:", nl=o.nl .. o.nl, indent=""})
+        append(s, track["codec-desc"], {prefix_sep="", nl="", indent=""})
         append(s, track["codec-profile"], {prefix="[", nl="", indent=" ", prefix_sep="",
                no_prefix_markup=true, suffix="]"})
         if track["codec"] ~= track["decoder"] then
@@ -992,7 +993,7 @@ local function add_video(s)
     end
     append_img_params(s, r, ro)
     append_hdr(s, ro)
-    append_property(s, "packet-video-bitrate", {prefix="Bitrate:", suffix=" kbps"})
+    append_property(s, "video-bitrate", {prefix="Bitrate:"})
     append_filters(s, "vf", "Filters:")
 end
 
@@ -1016,12 +1017,12 @@ local function add_audio(s)
     local track = mp.get_property_native("current-tracks/audio")
     if track then
         append(s, track["codec-desc"], {prefix_sep="", nl="", indent=""})
+        append(s, track["codec-profile"], {prefix="[", nl="", indent=" ", prefix_sep="",
+               no_prefix_markup=true, suffix="]"})
         if track["codec"] ~= track["decoder"] then
             append(s, track["decoder"], {prefix="[", nl="", indent=" ", prefix_sep="",
                    no_prefix_markup=true, suffix="]"})
         end
-        append(s, track["codec-profile"], {prefix="[", nl="", indent=" ", prefix_sep="",
-               no_prefix_markup=true, suffix="]"})
     end
     append_property(s, "current-ao", {prefix="AO:", nl="",
                                       indent=o.prefix_sep .. o.prefix_sep})
@@ -1037,7 +1038,7 @@ local function add_audio(s)
     append(s, merge(r, ro, "format"), {prefix="Format:", nl=cc and "" or o.nl,
                             indent=cc and o.prefix_sep .. o.prefix_sep})
     append(s, merge(r, ro, "samplerate"), {prefix="Sample Rate:", suffix=" Hz"})
-    append_property(s, "packet-audio-bitrate", {prefix="Bitrate:", suffix=" kbps"})
+    append_property(s, "audio-bitrate", {prefix="Bitrate:"})
     append_filters(s, "af", "Filters:")
 end
 
@@ -1217,7 +1218,7 @@ local function add_track(c, t, i)
         return
     end
 
-    local type = t["type"]:sub(1,1):upper() .. t["type"]:sub(2)
+    local type = t.image and "Image" or t["type"]:sub(1, 1):upper() .. t["type"]:sub(2)
     append(c, "", {prefix=type .. ":", nl=o.nl .. o.nl, indent=""})
     append(c, t["title"], {prefix_sep="", nl="", indent=""})
     append(c, t["id"], {prefix="ID:"})
@@ -1226,8 +1227,8 @@ local function add_track(c, t, i)
     append(c, t["ff-index"], {prefix="FFmpeg Index:", nl="", indent=o.prefix_sep .. o.prefix_sep})
     append(c, t["external-filename"], {prefix="File:"})
     append(c, "", {prefix="Flags:"})
-    local flags = {"default", "forced", "external", "dependent",
-                   "hearing-impaired", "visual-impaired", "image", "albumart"}
+    local flags = {"default", "forced", "dependent", "visual-impaired",
+                   "hearing-impaired", "image", "albumart", "external"}
     local any = false
     for _, flag in ipairs(flags) do
         if t[flag] then

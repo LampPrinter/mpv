@@ -62,6 +62,25 @@ mp.add_forced_key_binding(nil, "select-playlist", function ()
     })
 end)
 
+local function format_flags(track)
+    local flags = ""
+
+    for _, flag in ipairs({
+        "default", "forced", "dependent", "visual-impaired", "hearing-impaired",
+        "image", "external"
+    }) do
+        if track[flag] then
+            flags = flags .. flag .. " "
+        end
+    end
+
+    if flags == "" then
+        return ""
+    end
+
+    return " [" .. flags:sub(1, -2) .. "]"
+end
+
 local function format_track(track)
     return (track.selected and "●" or "○") ..
         (track.title and " " .. track.title or "") ..
@@ -74,20 +93,24 @@ local function format_track(track)
              and string.format("%.4f", track["demux-fps"]):gsub("%.?0*$", "") ..
              " fps " or "") ..
             (track["demux-channel-count"] and track["demux-channel-count"] ..
-             " ch " or "") ..
+             "ch " or "") ..
             (track["codec-profile"] and track.type == "audio"
              and track["codec-profile"] .. " " or "") ..
             (track["demux-samplerate"] and track["demux-samplerate"] / 1000 ..
              " kHz " or "") ..
-            (track.external and "external " or "")
-        ):sub(1, -2) .. ")"
+            (track["demux-bitrate"] and string.format("%.0f", track["demux-bitrate"] / 1000)
+             .. " kbps " or "") ..
+            (track["hls-bitrate"] and string.format("%.0f", track["hls-bitrate"] / 1000)
+             .. " HLS kbps " or "")
+        ):sub(1, -2) .. ")" .. format_flags(track)
 end
 
 mp.add_forced_key_binding(nil, "select-track", function ()
     local tracks = {}
 
     for i, track in ipairs(mp.get_property_native("track-list")) do
-        tracks[i] = track.type:sub(1, 1):upper() .. track.type:sub(2) .. ": " ..
+        tracks[i] = (track.image and "Image" or
+                     track.type:sub(1, 1):upper() .. track.type:sub(2)) .. ": " ..
                     format_track(track)
     end
 
@@ -232,8 +255,8 @@ mp.add_forced_key_binding(nil, "select-subtitle-line", function ()
     local sub_lines = {}
     local sub_times = {}
     local default_item
-    local sub_start = mp.get_property_native("sub-start",
-                                             mp.get_property_native("time-pos"))
+    local delay = mp.get_property_native("sub-delay")
+    local time_pos = mp.get_property_native("time-pos") - delay
     local duration = mp.get_property_native("duration", math.huge)
 
     -- Strip HTML and ASS tags.
@@ -243,17 +266,9 @@ mp.add_forced_key_binding(nil, "select-subtitle-line", function ()
         sub_lines[#sub_lines + 1] = format_time(sub_times[#sub_times], duration) ..
                                     " " .. line:gsub(".*]", "", 1)
 
-        if sub_times[#sub_times] <= sub_start then
+        if sub_times[#sub_times] <= time_pos then
             default_item = #sub_times
         end
-    end
-
-    -- Handle sub-start of embedded subs being slightly earlier than
-    -- ffmpeg's timestamps.
-    sub_start = mp.get_property_native("sub-start")
-    if sub_start and default_item and sub_times[default_item] < sub_start and
-       sub_lines[default_item + 1] then
-        default_item = default_item + 1
     end
 
     input.select({
@@ -263,9 +278,11 @@ mp.add_forced_key_binding(nil, "select-subtitle-line", function ()
         submit = function (index)
             -- Add an offset to seek to the correct line while paused without a
             -- video track.
-            local offset = mp.get_property_native("current-tracks/video/image") == false
-                           and 0 or .09
-            mp.commandv("seek", sub_times[index] + offset, "absolute")
+            if mp.get_property_native("current-tracks/video/image") ~= false then
+                delay = delay + 0.1
+            end
+
+            mp.commandv("seek", sub_times[index] + delay, "absolute")
         end,
     })
 end)

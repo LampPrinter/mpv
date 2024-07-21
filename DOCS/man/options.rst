@@ -2052,10 +2052,8 @@ Audio
     Audio delay in seconds (positive or negative float value). Positive values
     delay the audio, and negative values delay the video.
 
-``--mute=<yes|no|auto>``
+``--mute=<yes|no>``
     Set startup audio mute status (default: no).
-
-    ``auto`` is a deprecated possible value that is equivalent to ``no``.
 
     See also: ``--volume``.
 
@@ -2389,26 +2387,27 @@ Subtitles
 
 ``--sub-scale-by-window=<yes|no>``
     Whether to scale subtitles with the window size (default: yes). If this is
-    disabled, changing the window size won't change the subtitle font size.
+    disabled while ``--sub-scale-with-window`` is set to yes, changing the window
+    size won't change the subtitle font size.
 
     Affects plain text subtitles only (or ASS if ``--sub-ass-override`` is set
     high enough).
 
 ``--sub-scale-with-window=<yes|no>``
-    Make the subtitle font size relative to the window, instead of the video.
-    This is useful if you always want the same font size, even if the video
-    doesn't cover the window fully, e.g. because screen aspect and window
-    aspect mismatch (and the player adds black bars).
-
-    Default: yes.
-
-    This option is misnamed. The difference to the confusingly similar sounding
-    option ``--sub-scale-by-window`` is that ``--sub-scale-with-window`` still
-    scales with the approximate window size, while the other option disables
-    this scaling.
+    Make the subtitle font size relative to the window (default: yes). If this is
+    disabled while ``--sub-scale-by-window`` is set to yes, the subtitle font
+    size is scaled relative to the video size instead.
 
     Affects plain text subtitles only (or ASS if ``--sub-ass-override`` is set
     high enough).
+
+    .. note::
+
+        By default, the subtitle font size is scaled with the window size.
+        To make the font size constant, set only ``--sub-scale-by-window`` to no.
+        To make the font size scale with video size instead, set only
+        ``--sub-scale-with-window`` to no.
+        It's not meaningful to set both options to no.
 
 ``--sub-ass-scale-with-window=<yes|no>``
     Like ``--sub-scale-with-window``, but affects subtitles in ASS format only.
@@ -2834,10 +2833,6 @@ Subtitles
 
     Default: 55.
 
-``--sub-back-color=<color>``
-    See ``--sub-color``. Color used for sub text background. You can use
-    ``--sub-shadow-offset`` to change its size relative to the text.
-
 ``--sub-blur=<0..20.0>``
     Gaussian blur factor applied to the sub font border.
     0 means no blur applied (default).
@@ -2848,14 +2843,47 @@ Subtitles
 ``--sub-italic=<yes|no>``
     Format text on italic.
 
-``--sub-border-color=<color>``
-    See ``--sub-color``. Color used for the sub font border.
+``--sub-outline-color=<color>``
+    See ``--sub-color``. Color used for the sub font outline.
 
-``--sub-border-size=<size>``
-    Size of the sub font border in scaled pixels (see ``--sub-font-size``
-    for details). A value of 0 disables borders.
+    ``--sub-border-color`` is an alias for ``--sub-outline-color``.
+
+``--sub-back-color=<color>``
+    See ``--sub-color``. Color used for sub text background.
+
+    ``--sub-shadow-color`` is an alias for ``--sub-back-color``.
+
+``--sub-outline-size=<size>``
+    Size of the sub font outline in scaled pixels (see ``--sub-font-size``
+    for details). A value of 0 disables outlines.
+
+    ``--sub-border-size`` is an alias for ``--sub-outline-size``.
 
     Default: 3.
+
+``--sub-border-style=<outline-and-shadow|opaque-box|background-box>``
+    The style of the border.
+
+    - ``outline-and-shadow``: draw outline and shadow.
+      The size of the outline is determined by ``--sub-outline-size``,
+      and the offset of the shadow is determined by ``--sub-shadow-offset``.
+      The outline is colored by ``--sub-outline-color``,
+      and the shadow is colored by ``--sub-back-color``.
+      This corresponds to ``BorderStyle=1`` in the ASS spec.
+    - ``opaque-box``: draw outline and shadow as opaque boxes that tightly wrap each lines of text.
+      The margin of the outline opaque box is determined by ``--sub-outline-size``,
+      and the offset of the shadow opaque box is determined by ``--sub-shadow-offset``.
+      The outline opaque box is colored by ``--sub-outline-color``,
+      and the shadow opaque box is colored by ``--sub-back-color``.
+      Despite its name, the opaque box can be semi-transparent.
+      This corresponds to ``BorderStyle=3`` in the ASS spec.
+    - ``background-box``: draw a background box that bounds all lines of text.
+      The background box is colored by ``--sub-back-color``,
+      and the margin of the background box is determined by ``--sub-shadow-offset``.
+      The behavior of the outline is the same as the ``outline-and-shadow`` style.
+      This corresponds to ``BorderStyle=4``, which is a libass-specific extension.
+
+    Default: ``outline-and-shadow``.
 
 ``--sub-color=<color>``
     Specify the color used for unstyled text subtitles.
@@ -2878,7 +2906,7 @@ Subtitles
     Alternatively, the color can be specified as a RGB hex triplet in the form
     ``#RRGGBB``, where each 2-digit group expresses a color value in the
     range 0 (``00``) to 255 (``FF``). For example, ``#FF0000`` is red.
-    This is similar to web colors. Alpha is given with ``#AARRGGBB``.
+    Alpha is given with ``#AARRGGBB``.
 
     .. admonition:: Examples
 
@@ -2925,15 +2953,6 @@ Subtitles
     Applies justification as defined by ``--sub-justify`` on ASS subtitles
     if ``--sub-ass-override`` is not set to ``no``.
     Default: ``no``.
-
-``--sub-shadow-color=<color>``
-    See ``--sub-color``. Color used for sub text shadow.
-
-    .. note::
-
-        ignored when ``--sub-back-color`` is
-        specified (or more exactly: when that option is not set to completely
-        transparent).
 
 ``--sub-shadow-offset=<size>``
     Displacement of the sub text shadow in scaled pixels (see
@@ -4413,14 +4432,13 @@ OSD
 ``--osd-bar-h=<0.1-50>``
     Height of the OSD bar, in percentage of the screen height (default: 3.125).
 
-``--osd-bar-border-size=<size>``
-    Size of the border of the OSD bar in scaled pixels (see ``--sub-font-size``
+``--osd-bar-outline-size=<size>``
+    Size of the outline of the OSD bar in scaled pixels (see ``--sub-font-size``
     for details).
 
-    Default: 0.5.
+    ``--osd-bar-border-size`` is an alias for ``--osd-bar-outline-size``.
 
-``--osd-back-color=<color>``
-    See ``--sub-color``. Color used for OSD text background.
+    Default: 0.5.
 
 ``--osd-blur=<0..20.0>``
     Gaussian blur factor applied to the OSD font border.
@@ -4432,14 +4450,26 @@ OSD
 ``--osd-italic=<yes|no>``
     Format text on italic.
 
-``--osd-border-color=<color>``
-    See ``--sub-color``. Color used for the OSD font border.
+``--osd-outline-color=<color>``
+    See ``--sub-color``. Color used for the OSD font outline.
 
-``--osd-border-size=<size>``
-    Size of the OSD font border in scaled pixels (see ``--sub-font-size``
-    for details). A value of 0 disables borders.
+    ``--osd-border-color`` is an alias for ``--osd-outline-color``.
+
+``--osd-back-color=<color>``
+    See ``--sub-color``. Color used for OSD text background.
+
+    ``--osd-shadow-color`` is an alias for ``--osd-back-color``.
+
+``--osd-outline-size=<size>``
+    Size of the OSD font outline in scaled pixels (see ``--sub-font-size``
+    for details). A value of 0 disables outlines.
+
+    ``--osd-border-size`` is an alias for ``--osd-outline-size``.
 
     Default: 3.
+
+``--osd-border-style=<outline-and-shadow|opaque-box|background-box>``
+    See ``--sub-border-style``. Style used for OSD text border.
 
 ``--osd-color=<color>``
     Specify the color used for OSD.
@@ -4496,14 +4526,6 @@ OSD
         For scripts which draw user interface elements, it is recommended to
         respect the value of this option when deciding whether the elements
         are scaled with window size or not.
-
-``--osd-shadow-color=<color>``
-    See ``--sub-color``. Color used for OSD shadow.
-
-    .. note::
-
-        Ignored when ``--osd-back-color`` is specified (or more exactly: when
-        that option is not set to completely transparent).
 
 ``--osd-shadow-offset=<size>``
     Displacement of the OSD shadow in scaled pixels (see
@@ -5923,6 +5945,11 @@ them.
     Defines the size of an edge border (default: 32) to initiate client side
     resizes events in the wayland contexts with touch events.
 
+``--wayland-present=<yes|no>``
+    Enable the use of wayland's presentation time protocol for more accurate
+    frame presentation if it is supported by the compositor (default: ``yes``).
+    This only has an effect if ``--video-sync=display-...`` is being used.
+
 ``--spirv-compiler=<compiler>``
     Controls which compiler is used to translate GLSL to SPIR-V. This is
     only relevant for ``--gpu-api=d3d11`` with ``--vo=gpu``.
@@ -6481,6 +6508,11 @@ them.
     :system:   No manual syncing, depend on the layer mechanic and the next drawable
     :feedback: Same as precise but uses the presentation feedback core mechanism
 
+``--macos-menu-shortcuts=<yes|no>``
+    Enables the default menu bar shortcuts (default: yes). The menu bar shortcuts always take
+    precedence over any other shortcuts, they are not propagated to the mpv core and they can't be
+    used in config files like ``input.conf`` or script bindings.
+
 ``--android-surface-size=<WxH>``
     Set dimensions of the rendering surface used by the Android gpu context.
     Needs to be set by the embedding application if the dimensions change during
@@ -6538,8 +6570,8 @@ them.
     macvk
         Vulkan on macOS with a metal surface through a translation layer (experimental)
 
-``--gpu-api=<type>``
-    Controls which type of graphics APIs will be accepted:
+``--gpu-api=<type1,type2,...[,]>``
+    Specify a priority list of accepted graphics APIs.
 
     auto
         Use any available API (default). Note that the default GPU API used for this

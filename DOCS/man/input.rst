@@ -590,7 +590,7 @@ Remember to quote string arguments in input.conf (see `Flat command syntax`_).
 
 ``subprocess``
     Similar to ``run``, but gives more control about process execution to the
-    caller, and does does not detach the process.
+    caller, and does not detach the process.
 
     You can avoid blocking until the process terminates by running this command
     asynchronously. (For example ``mp.command_native_async()`` in Lua scripting.)
@@ -2112,11 +2112,11 @@ Property list
         ``time-remaining`` with milliseconds.
 
 ``audio-pts``
-    Current audio playback position in current file in seconds. Unlike time-pos,
+    Current audio playback position in current file in seconds. Unlike ``time-pos``,
     this updates more often than once per frame. This is mostly equivalent to
-    time-pos for audio-only files however it also takes into account the audio
+    ``time-pos`` for audio-only files however it also takes into account the audio
     driver delay. This can lead to negative values in certain cases, so in
-    general you probably want to simply use time-pos.
+    general you probably want to simply use ``time-pos``.
 
     This has a sub-property:
 
@@ -2132,10 +2132,10 @@ Property list
         ``playtime-remaining`` with milliseconds.
 
 ``playback-time`` (RW)
-    Position in current file in seconds. Unlike ``time-pos``, the time is
-    clamped to the range of the file. (Inaccurate file durations etc. could
-    make it go out of range. Useful on attempts to seek outside of the file,
-    as the seek target time is considered the current position during seeking.)
+    Alias for ``time-pos``.
+
+    Prior to mpv 0.39.0, ``time-pos`` and ``playback-time`` could report
+    different values in certain edge cases.
 
     This has a sub-property:
 
@@ -2258,7 +2258,7 @@ Property list
 ``vf-metadata/<filter-label>``
     Metadata added by video filters. Accessed by the filter label,
     which, if not explicitly specified using the ``@filter-label:`` syntax,
-    will be ``<filter-name>NN``.
+    will be ``<filter-name>.NN``.
 
     Works similar to ``metadata`` property. It allows the same access
     methods (using sub-properties).
@@ -3108,6 +3108,24 @@ Property list
         ``yes``/true if the track has the forced flag set in the file,
         ``no``/false or unavailable otherwise.
 
+    ``track-list/N/dependent``
+        ``yes``/true if the track has the dependent flag set in the file,
+        ``no``/false or unavailable otherwise.
+
+    ``track-list/N/visual-impaired``
+        ``yes``/true if the track has the visual impaired flag set in the file,
+        ``no``/false or unavailable otherwise.
+
+    ``track-list/N/hearing-impaired``
+        ``yes``/true if the track has the hearing impaired flag set in the file,
+        ``no``/false or unavailable otherwise.
+
+    ``track-list/N/hls-bitrate``
+        The bitrate of the HLS stream, if available.
+
+    ``track-list/N/program-id``
+        The program ID of the HLS stream, if available.
+
     ``track-list/N/codec``
         The codec name used by this track, for example ``h264``. Unavailable
         in some rare cases.
@@ -3221,6 +3239,11 @@ Property list
                 "albumart"          MPV_FORMAT_FLAG
                 "default"           MPV_FORMAT_FLAG
                 "forced"            MPV_FORMAT_FLAG
+                "dependent"         MPV_FORMAT_FLAG
+                "visual-impaired"   MPV_FORMAT_FLAG
+                "hearing-impaired"  MPV_FORMAT_FLAG
+                "hls-bitrate"       MPV_FORMAT_INT64
+                "program-id"        MPV_FORMAT_INT64
                 "selected"          MPV_FORMAT_FLAG
                 "main-selection"    MPV_FORMAT_INT64
                 "external"          MPV_FORMAT_FLAG
@@ -3229,6 +3252,7 @@ Property list
                 "codec-desc"        MPV_FORMAT_STRING
                 "codec-profile"     MPV_FORMAT_STRING
                 "ff-index"          MPV_FORMAT_INT64
+                "decoder"           MPV_FORMAT_STRING
                 "decoder-desc"      MPV_FORMAT_STRING
                 "demux-w"           MPV_FORMAT_INT64
                 "demux-h"           MPV_FORMAT_INT64
@@ -3243,6 +3267,7 @@ Property list
                 "demux-bitrate"     MPV_FORMAT_INT64
                 "demux-rotation"    MPV_FORMAT_INT64
                 "demux-par"         MPV_FORMAT_DOUBLE
+                "format-name"       MPV_FORMAT_STRING
                 "audio-channels"    MPV_FORMAT_INT64
                 "replaygain-track-peak" MPV_FORMAT_DOUBLE
                 "replaygain-track-gain" MPV_FORMAT_DOUBLE
@@ -3453,14 +3478,6 @@ Property list
 
     In earlier versions of mpv, these properties returned a static (but bad)
     guess using a completely different method.
-
-``packet-video-bitrate``, ``packet-audio-bitrate``, ``packet-sub-bitrate``
-    Old and deprecated properties for ``video-bitrate``, ``audio-bitrate``,
-    ``sub-bitrate``. They behave exactly the same, but return a value in
-    kilobits. Also, they don't have any OSD formatting, though the same can be
-    achieved with e.g. ``${=video-bitrate}``.
-
-    These properties shouldn't be used anymore.
 
 ``audio-device-list``
     The list of discovered audio devices. This is mostly for use with the

@@ -799,7 +799,7 @@ static const struct mp_keymap keymap[] = {
     // numpad without numlock
     {XK_KP_Insert, MP_KEY_KPINS}, {XK_KP_End, MP_KEY_KPEND},
     {XK_KP_Down, MP_KEY_KPDOWN}, {XK_KP_Page_Down, MP_KEY_KPPGDOWN},
-    {XK_KP_Left, MP_KEY_KPLEFT}, {XK_KP_Begin, MP_KEY_KP5},
+    {XK_KP_Left, MP_KEY_KPLEFT}, {XK_KP_Begin, MP_KEY_KPBEGIN},
     {XK_KP_Right, MP_KEY_KPRIGHT}, {XK_KP_Home, MP_KEY_KPHOME}, {XK_KP_Up, MP_KEY_KPUP},
     {XK_KP_Page_Up, MP_KEY_KPPGUP}, {XK_KP_Delete, MP_KEY_KPDEL},
 
@@ -2132,6 +2132,8 @@ int vo_x11_control(struct vo *vo, int *events, int request, void *arg)
                 vo_x11_set_input_region(vo, opts->cursor_passthrough);
             if (opt == &opts->x11_present)
                 xpresent_set(x11);
+            if (opt == &opts->keepaspect || opt == &opts->keepaspect_window)
+                vo_x11_sizehint(vo, x11->fs ? x11->nofsrc : x11->winrc, false);
             if (opt == &opts->geometry || opt == &opts->autofit ||
                 opt == &opts->autofit_smaller || opt == &opts->autofit_larger)
             {
