@@ -111,7 +111,7 @@ static const struct m_sub_options screenshot_conf = {
 #define OPT_BASE_STRUCT struct mp_vo_opts
 
 static const m_option_t mp_vo_opt_list[] = {
-    {"vo", OPT_SETTINGSLIST(video_driver_list, &vo_obj_list)},
+    {"vo", OPT_SETTINGSLIST(video_driver_list, &vo_obj_list), .flags = UPDATE_VO},
     {"taskbar-progress", OPT_BOOL(taskbar_progress)},
     {"drag-and-drop", OPT_CHOICE(drag_and_drop, {"no", -2}, {"auto", -1},
         {"replace", DND_REPLACE},
@@ -194,8 +194,16 @@ static const m_option_t mp_vo_opt_list[] = {
     {"x11-wid-title", OPT_BOOL(x11_wid_title)},
 #endif
 #if HAVE_WAYLAND
-    {"wayland-content-type", OPT_CHOICE(content_type, {"auto", -1}, {"none", 0},
+    {"wayland-configure-bounds", OPT_CHOICE(wl_configure_bounds,
+        {"auto", -1}, {"no", 0}, {"yes", 1})},
+    {"wayland-content-type", OPT_CHOICE(wl_content_type, {"auto", -1}, {"none", 0},
         {"photo", 1}, {"video", 2}, {"game", 3})},
+    {"wayland-disable-vsync", OPT_BOOL(wl_disable_vsync)},
+    {"wayland-edge-pixels-pointer", OPT_INT(wl_edge_pixels_pointer),
+        M_RANGE(0, INT_MAX)},
+    {"wayland-edge-pixels-touch", OPT_INT(wl_edge_pixels_touch),
+        M_RANGE(0, INT_MAX)},
+    {"wayland-present", OPT_BOOL(wl_present)},
 #endif
 #if HAVE_WIN32_DESKTOP
 // For old MinGW-w64 compatibility
@@ -250,11 +258,15 @@ const struct m_sub_options vo_sub_opts = {
         .border = true,
         .title_bar = true,
         .appid = "mpv",
-        .content_type = -1,
         .WinID = -1,
         .window_scale = 1.0,
         .x11_bypass_compositor = 2,
         .x11_present = 1,
+        .wl_configure_bounds = -1,
+        .wl_content_type = -1,
+        .wl_edge_pixels_pointer = 16,
+        .wl_edge_pixels_touch = 32,
+        .wl_present = true,
         .mmcss_profile = "Playback",
         .ontop_level = -1,
         .timing_offset = 0.050,
@@ -531,6 +543,8 @@ static const m_option_t mp_opts[] = {
         {"idle",        IDLE_PRIORITY_CLASS}),
         .flags = UPDATE_PRIORITY},
 #endif
+    {"media-controls", OPT_CHOICE(media_controls,
+        {"no", 0}, {"player", 1}, {"yes", 2})},
     {"config", OPT_BOOL(load_config), .flags = CONF_PRE_PARSE},
     {"config-dir", OPT_STRING(force_configdir),
         .flags = CONF_NOCFG | CONF_PRE_PARSE | M_OPT_FILE},
@@ -661,6 +675,7 @@ static const m_option_t mp_opts[] = {
     {"audio-channels", OPT_CHANNELS(audio_output_channels), .flags = UPDATE_AUDIO},
     {"audio-format", OPT_AUDIOFORMAT(audio_output_format), .flags = UPDATE_AUDIO},
     {"speed", OPT_DOUBLE(playback_speed), M_RANGE(0.01, 100.0)},
+    {"pitch", OPT_DOUBLE(playback_pitch), M_RANGE(0.01, 100.0)},
 
     {"audio-pitch-correction", OPT_BOOL(pitch_correction)},
 
@@ -705,11 +720,14 @@ static const m_option_t mp_opts[] = {
     {"sub-auto-exts", OPT_STRINGLIST(sub_auto_exts), .flags = UPDATE_SUB_EXTS},
     {"audio-file-auto", OPT_CHOICE(audiofile_auto,
         {"no", -1}, {"exact", 0}, {"fuzzy", 1}, {"all", 2})},
-    {"audio-file-auto-exts", OPT_STRINGLIST(audiofile_auto_exts)},
+    {"audio-exts", OPT_STRINGLIST(audio_exts)},
+    {"audio-file-auto-exts", OPT_ALIAS("audio-exts")},
     {"cover-art-auto", OPT_CHOICE(coverart_auto,
         {"no", -1}, {"exact", 0}, {"fuzzy", 1}, {"all", 2})},
-    {"cover-art-auto-exts", OPT_STRINGLIST(coverart_auto_exts)},
-    {"cover-art-whitelist", OPT_BOOL(coverart_whitelist)},
+    {"image-exts", OPT_STRINGLIST(image_exts)},
+    {"cover-art-auto-exts", OPT_ALIAS("image-exts")},
+    {"cover-art-whitelist", OPT_STRINGLIST(coverart_whitelist)},
+    {"video-exts", OPT_STRINGLIST(video_exts)},
 
     {"", OPT_SUBSTRUCT(subs_rend, mp_subtitle_sub_opts)},
     {"", OPT_SUBSTRUCT(subs_shared, mp_subtitle_shared_sub_opts)},
@@ -869,9 +887,7 @@ static const m_option_t mp_opts[] = {
     {"input-terminal", OPT_BOOL(consolecontrols), .flags = UPDATE_TERM},
 
     {"input-ipc-server", OPT_STRING(ipc_path), .flags = M_OPT_FILE},
-#if HAVE_POSIX
     {"input-ipc-client", OPT_STRING(ipc_client)},
-#endif
 
     {"screenshot", OPT_SUBSTRUCT(screenshot_image_opts, screenshot_conf)},
     {"screenshot-template", OPT_STRING(screenshot_template)},
@@ -926,10 +942,6 @@ static const m_option_t mp_opts[] = {
 
 #if HAVE_DRM
     {"", OPT_SUBSTRUCT(drm_opts, drm_conf)},
-#endif
-
-#if HAVE_WAYLAND
-    {"", OPT_SUBSTRUCT(wayland_opts, wayland_conf)},
 #endif
 
 #if HAVE_GL_WIN32
@@ -1028,42 +1040,24 @@ static const struct MPOpts mp_default_opts = {
     .audio_display = 1,
     .audio_output_format = 0,  // AF_FORMAT_UNKNOWN
     .playback_speed = 1.,
+    .playback_pitch = 1.,
     .pitch_correction = true,
     .audiofile_auto = -1,
-    .coverart_whitelist = true,
     .osd_bar_visible = true,
     .screenshot_template = "mpv-shot%n",
     .play_dir = 1,
-
-    .audiofile_auto_exts = (char *[]){
-        "aac",
-        "ac3",
-        "dts",
-        "eac3",
-        "flac",
-        "m4a",
-        "mka",
-        "mp3",
-        "ogg",
-        "opus",
-        "thd",
-        "wav",
-        "wv",
-        NULL
+    .media_controls = 1,
+    .video_exts = (char *[]){
+        "3g2", "3gp", "avi", "flv", "m2ts", "m4v", "mj2", "mkv", "mov", "mp4",
+        "mpeg", "mpg", "ogv", "rmvb", "ts", "webm", "wmv", "y4m", NULL
     },
-
-    .coverart_auto_exts = (char *[]){
-        "avif",
-        "bmp",
-        "gif",
-        "jpeg",
-        "jpg",
-        "jxl",
-        "png",
-        "tif",
-        "tiff",
-        "webp",
-        NULL
+    .audio_exts = (char *[]){
+        "aac", "ac3", "aiff", "ape", "au", "dts", "eac3", "flac", "m4a", "mka",
+        "mp3", "oga", "ogg", "ogm", "opus", "thd", "wav", "wav", "wma", "wv", NULL
+    },
+    .image_exts = (char *[]){
+        "avif", "bmp", "gif", "j2k", "jp2", "jpeg", "jpg", "jxl", "png",
+        "svg", "tga", "tif", "tiff", "webp", NULL
     },
 
     .sub_auto_exts = (char *[]){
@@ -1087,6 +1081,20 @@ static const struct MPOpts mp_default_opts = {
         NULL
     },
 
+    // Stolen from: vlc/-/blob/master/modules/meta_engine/folder.c#L40
+    // sorted by priority (descending)
+    .coverart_whitelist = (char *[]){
+        "AlbumArt",
+        "Album",
+        "cover",
+        "front",
+        "AlbumArtSmall",
+        "Folder",
+        ".folder",
+        "thumb",
+        NULL
+    },
+
     .audio_output_channels = {
         .set = 1,
         .auto_safe = 1,
@@ -1105,6 +1113,7 @@ static const struct MPOpts mp_default_opts = {
     .watch_later_options = (char *[]){
         "start",
         "speed",
+        "pitch",
         "edition",
         "volume",
         "mute",

@@ -2142,6 +2142,18 @@ Property list
     ``playback-time/full``
         ``playback-time`` with milliseconds.
 
+``remaining-file-loops``
+    How many more times the current file is going to be looped. This is
+    initialized from the value of ``--loop-file``. This counts the number of
+    times it causes the player to seek to the beginning of the file, so it is 0
+    the last the time is played. -1 corresponds to infinity.
+
+``remaining-ab-loops``
+    How many more times the current A-B loop is going to be looped, if one is
+    active. This is initialized from the value of ``--ab-loop-count``. This
+    counts the number of times it causes the player to seek to ``--ab-loop-a``,
+    so it is 0 the last the time the loop is played. -1 corresponds to infinity.
+
 ``chapter`` (RW)
     Current chapter number. The number of the first chapter is 0.
 
@@ -3536,6 +3548,20 @@ Property list
     general use (i.e. scripts, IPC clients, host applications, etc).
     The player itself does not use any data in it (although some builtin scripts may).
     The property is not preserved across player restarts.
+
+    The following sub-paths are reserved for internal uses or have special semantics:
+    ``user-data/osc``, ``user-data/mpv``. Unless noted otherwise, the semantics of
+    any properties under these sub-paths can change at any time and may not be relied
+    upon, and writing to these properties may prevent builtin scripts from working
+    properly.
+
+    Currently, the following properties have defined special semantics:
+
+    ``user-data/osc/margins``
+        This property is written by an OSC implementation to indicate the margins that it
+        occupies. Its sub-properties ``l``, ``r``, ``t``, and ``b`` should all be set to
+        the left, right, top, and bottom margins respectively.
+        Values are between 0.0 and 1.0, normalized to window width/height.
 
     Sub-paths can be accessed directly; e.g. ``user-data/my-script/state/a`` can be
     read, written, or observed.

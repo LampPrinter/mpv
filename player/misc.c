@@ -129,7 +129,7 @@ bool get_ab_loop_times(struct MPContext *mpctx, double t[2])
     t[0] = opts->ab_loop[0];
     t[1] = opts->ab_loop[1];
 
-    if (!opts->ab_loop_count)
+    if (!mpctx->remaining_ab_loops)
         return false;
 
     if (t[0] == MP_NOPTS_VALUE || t[1] == MP_NOPTS_VALUE || t[0] == t[1])
@@ -342,4 +342,15 @@ const char *mp_status_str(enum playback_status st)
     case STATUS_EOF:        return "eof";
     default:                return "bug";
     }
+}
+
+bool str_in_list(bstr str, char **list)
+{
+    if (!list)
+        return false;
+    while (*list) {
+        if (!bstrcasecmp0(str, *list++))
+            return true;
+    }
+    return false;
 }

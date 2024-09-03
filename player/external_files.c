@@ -28,53 +28,30 @@
 #include "misc/language.h"
 #include "options/options.h"
 #include "options/path.h"
+#include "player/core.h"
 #include "external_files.h"
-
-// Stolen from: vlc/-/blob/master/modules/meta_engine/folder.c#L40
-// sorted by priority (descending)
-static const char *const cover_files[] = {
-    "AlbumArt",
-    "Album",
-    "cover",
-    "front",
-    "AlbumArtSmall",
-    "Folder",
-    ".folder",
-    "thumb",
-    NULL
-};
 
 // Needed for mp_might_be_subtitle_file
 char **sub_exts;
 
-static bool test_ext_list(bstr ext, char **list)
-{
-    if (!list)
-        goto done;
-    for (int n = 0; list[n]; n++) {
-        if (bstrcasecmp(bstr0(list[n]), ext) == 0)
-            return true;
-    }
-done:
-    return false;
-}
-
 static int test_ext(MPOpts *opts, bstr ext)
 {
-    if (test_ext_list(ext, opts->sub_auto_exts))
+    if (str_in_list(ext, opts->sub_auto_exts))
         return STREAM_SUB;
-    if (test_ext_list(ext, opts->audiofile_auto_exts))
+    if (str_in_list(ext, opts->audio_exts))
         return STREAM_AUDIO;
-    if (test_ext_list(ext, opts->coverart_auto_exts))
+    if (str_in_list(ext, opts->image_exts))
         return STREAM_VIDEO;
     return -1;
 }
 
-static int test_cover_filename(bstr fname)
+static int test_cover_filename(bstr fname, char **cover_files)
 {
     for (int n = 0; cover_files[n]; n++) {
         if (bstrcasecmp(bstr0(cover_files[n]), fname) == 0) {
-            return MP_ARRAY_SIZE(cover_files) - n;
+            size_t size = n;
+            while (cover_files[++size]);
+            return size - n;
         }
     }
     return 0;
@@ -82,7 +59,7 @@ static int test_cover_filename(bstr fname)
 
 bool mp_might_be_subtitle_file(const char *filename)
 {
-    return test_ext_list(bstr_get_ext(bstr0(filename)), sub_exts);
+    return str_in_list(bstr_get_ext(bstr0(filename)), sub_exts);
 }
 
 void mp_update_subtitle_exts(struct MPOpts *opts)
@@ -198,8 +175,8 @@ static void append_dir_subtitles(struct mpv_global *global, struct MPOpts *opts,
         if (bstr_find(tmp_fname_trim, f_fname_trim) >= 0 && fuzz >= 1)
             prio |= 2; // contains the movie name
 
-        if (type == STREAM_VIDEO && opts->coverart_whitelist && prio == 0)
-            prio = test_cover_filename(tmp_fname_trim);
+        if (type == STREAM_VIDEO && prio == 0)
+            prio = test_cover_filename(tmp_fname_trim, opts->coverart_whitelist);
 
         // doesn't contain the movie name
         // don't try in the mplayer subtitle directory

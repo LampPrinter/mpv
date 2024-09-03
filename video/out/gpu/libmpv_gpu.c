@@ -107,7 +107,7 @@ static int set_parameter(struct render_backend *ctx, mpv_render_param param)
     switch (param.type) {
     case MPV_RENDER_PARAM_ICC_PROFILE: {
         mpv_byte_array *data = param.data;
-        gl_video_set_icc_profile(p->renderer, (bstr){data->data, data->size});
+        gl_video_set_icc_profile(p->renderer, bstrdup(NULL, (bstr){data->data, data->size}));
         return 0;
     }
     case MPV_RENDER_PARAM_AMBIENT_LIGHT: {
@@ -124,7 +124,9 @@ static void reconfig(struct render_backend *ctx, struct mp_image_params *params)
 {
     struct priv *p = ctx->priv;
 
-    gl_video_config(p->renderer, params);
+    struct mp_image_params fallback_params = *params;
+    mp_image_params_restore_dovi_mapping(&fallback_params);
+    gl_video_config(p->renderer, &fallback_params);
 }
 
 static void reset(struct render_backend *ctx)
