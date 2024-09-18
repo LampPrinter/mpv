@@ -152,7 +152,6 @@ struct osd_state *osd_create(struct mpv_global *global)
     osd->objs[OSDTYPE_SUB]->is_sub = true;
     osd->objs[OSDTYPE_SUB2]->is_sub = true;
 
-    osd_init_backend(osd);
     return osd;
 }
 
@@ -334,6 +333,8 @@ struct sub_bitmap_list *osd_render(struct osd_state *osd, struct mp_osd_res res,
 {
     mp_mutex_lock(&osd->lock);
 
+    int64_t start_time = mp_time_ns();
+
     struct sub_bitmap_list *list = talloc_zero(NULL, struct sub_bitmap_list);
     list->change_id = 1;
     list->w = res.w;
@@ -388,6 +389,11 @@ struct sub_bitmap_list *osd_render(struct osd_state *osd, struct mp_osd_res res,
     // must not reset the flag when it happens.
     if (!(draw_flags & OSD_DRAW_SUB_FILTER))
         osd->want_redraw_notification = false;
+
+    double elapsed = MP_TIME_NS_TO_MS(mp_time_ns() - start_time);
+    bool slow = elapsed > 5;
+    mp_msg(osd->log, slow ? MSGL_DEBUG : MSGL_TRACE, "Spent %.3f ms in %s%s\n",
+           elapsed, __func__, slow ? " (slow!)" : "");
 
     mp_mutex_unlock(&osd->lock);
     return list;
