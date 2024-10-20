@@ -1518,12 +1518,18 @@ static int control(struct vo *vo, uint32_t request, void *data)
         return VO_TRUE;
 
     case VOCTRL_UPDATE_RENDER_OPTS: {
-        m_config_cache_update(p->opts_cache);
         update_ra_ctx_options(vo, &p->ra_ctx->opts);
         if (p->ra_ctx->fns->update_render_opts)
             p->ra_ctx->fns->update_render_opts(p->ra_ctx);
-        update_render_options(vo);
         vo->want_redraw = true;
+
+        // Special case for --image-lut which requires a full reset.
+        int old_type = p->next_opts->image_lut.type;
+        update_options(vo);
+        struct user_lut image_lut = p->next_opts->image_lut;
+        p->want_reset |= image_lut.opt && ((!image_lut.path && image_lut.opt) ||
+                         (image_lut.path && strcmp(image_lut.path, image_lut.opt)) ||
+                         (old_type != image_lut.type));
 
         // Also re-query the auto profile, in case `update_render_options`
         // unloaded a manually specified icc profile in favor of
@@ -2216,9 +2222,11 @@ static void update_render_options(struct vo *vo)
     };
 
     pars->color_map_params.tone_mapping_function = tone_map_funs[opts->tone_map.curve];
+AV_NOWARN_DEPRECATED(
     pars->color_map_params.tone_mapping_param = opts->tone_map.curve_param;
     if (isnan(pars->color_map_params.tone_mapping_param)) // vo_gpu compatibility
         pars->color_map_params.tone_mapping_param = 0.0;
+)
     pars->color_map_params.inverse_tone_mapping = opts->tone_map.inverse;
     pars->color_map_params.contrast_recovery = opts->tone_map.contrast_recovery;
     pars->color_map_params.visualize_lut = opts->tone_map.visualize;

@@ -24,6 +24,7 @@ local o = {
     key_scroll_up = "UP",
     key_scroll_down = "DOWN",
     key_search = "/",
+    key_exit = "ESC",
     scroll_lines = 1,
 
     duration = 4,
@@ -135,6 +136,7 @@ local function init_buffers()
 end
 local cache_ahead_buf, cache_speed_buf
 local perf_buffers = {}
+local process_key_binding
 
 local function graph_add_value(graph, value)
     graph.pos = (graph.pos % graph.len) + 1
@@ -412,8 +414,9 @@ end
 -- command prefix tokens to strip - includes generic property commands
 local cmd_prefixes = {
     osd_auto=1, no_osd=1, osd_bar=1, osd_msg=1, osd_msg_bar=1, raw=1, sync=1,
-    async=1, expand_properties=1, repeatable=1, nonrepeatable=1, set=1, add=1,
-    multiply=1, toggle=1, cycle=1, cycle_values=1, ["!reverse"]=1, change_list=1,
+    async=1, expand_properties=1, repeatable=1, nonrepeatable=1, nonscalable=1,
+    set=1, add=1, multiply=1, toggle=1, cycle=1, cycle_values=1, ["!reverse"]=1,
+    change_list=1,
 }
 -- commands/writable-properties prefix sub-words (followed by -) to strip
 local name_prefixes = {
@@ -1525,7 +1528,7 @@ local function print_page(page, after_scroll)
     end
 end
 
-local function update_scale(value)
+local function update_scale(osd_height)
     local scale_with_video
     if o.vidscale == "auto" then
         scale_with_video = mp.get_property_native("osd-scale-by-window")
@@ -1535,8 +1538,8 @@ local function update_scale(value)
 
     -- Calculate scaled metrics.
     local scale = 1
-    if not scale_with_video and value > 0 then
-        scale = 720 / value
+    if not scale_with_video and osd_height > 0 then
+        scale = 720 / osd_height
     end
     font_size = o.font_size * scale
     border_size = o.border_size * scale
@@ -1548,13 +1551,12 @@ local function update_scale(value)
     end
 end
 
-local function handle_osd_height_update(_, value)
-    update_scale(value)
+local function handle_osd_height_update(_, osd_height)
+    update_scale(osd_height)
 end
 
 local function handle_osd_scale_by_window_update()
-    local value = mp.get_property_native("osd-height")
-    update_scale(value)
+    update_scale(mp.get_property_native("osd-height"))
 end
 
 local function clear_screen()
@@ -1631,6 +1633,21 @@ local function unbind_search()
     mp.remove_key_binding("__forced_"..o.key_search)
 end
 
+local function bind_exit()
+    -- Don't bind in oneshot mode because if ESC is pressed right when the stats
+    -- stop being displayed, it would unintentionally trigger any user-defined
+    -- ESC binding.
+    if not display_timer.oneshot then
+        mp.add_forced_key_binding(o.key_exit, "__forced_" .. o.key_exit, function ()
+            process_key_binding(false)
+        end)
+    end
+end
+
+local function unbind_exit()
+    mp.remove_key_binding("__forced_" .. o.key_exit)
+end
+
 local function update_scroll_bindings(k)
     if pages[k].scroll then
         bind_scroll()
@@ -1660,6 +1677,7 @@ local function add_page_bindings()
         mp.add_forced_key_binding(k, "__forced_"..k, a(k), {repeatable=true})
     end
     update_scroll_bindings(curr_page)
+    bind_exit()
 end
 
 
@@ -1670,10 +1688,11 @@ local function remove_page_bindings()
     end
     unbind_scroll()
     unbind_search()
+    unbind_exit()
 end
 
 
-local function process_key_binding(oneshot)
+process_key_binding = function(oneshot)
     reset_scroll_offsets()
     -- Stats are already being displayed
     if display_timer:is_enabled() then
@@ -1776,19 +1795,29 @@ mp.register_event("video-reconfig",
 
 --  --script-opts=stats-bindlist=[-]{yes|<TERM-WIDTH>}
 if o.bindlist ~= "no" then
-    mp.command("no-osd set really-quiet yes")
-    if o.bindlist:sub(1, 1) == "-" then
-        o.bindlist = o.bindlist:sub(2)
-        o.no_ass_b0 = ""
-        o.no_ass_b1 = ""
-    end
-    local width = max(40, math.floor(tonumber(o.bindlist) or 79))
-    mp.add_timeout(0, function()  -- wait for all other scripts to finish init
+    -- This is a special mode to print key bindings to the terminal,
+    -- Adjust the print format and level to make it print only the key bindings.
+    mp.set_property("msg-level", "all=no,statusline=status")
+    mp.set_property("term-osd", "force")
+    mp.set_property_bool("msg-module", false)
+    mp.set_property_bool("msg-time", false)
+    -- wait for all other scripts to finish init
+    mp.add_timeout(0, function()
+        if o.bindlist:sub(1, 1) == "-" then
+            o.bindlist = o.bindlist:sub(2)
+            o.no_ass_b0 = ""
+            o.no_ass_b1 = ""
+        end
+        local width = max(40, math.floor(tonumber(o.bindlist) or 79))
         o.ass_formatting = false
         o.no_ass_indent = " "
         o.term_size = { w = width , h = 0}
-        io.write(keybinding_info(false, true) .. "\n")
-        mp.command("quit")
+        mp.osd_message(keybinding_info(false, true))
+        -- wait for next tick to print status line and flush it without clearing
+        mp.add_timeout(0, function()
+            mp.command("flush-status-line no")
+            mp.command("quit")
+        end)
     end)
 end
 

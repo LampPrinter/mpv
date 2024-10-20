@@ -1050,7 +1050,7 @@ Program Behavior
     binding (default: yes). By default, the ``i`` key is used (``I`` to make
     the overlay permanent).
 
-``--load-osd-console=<yes|no>``
+``--load-console=<yes|no>``
     Enable the built-in script that shows a console on a key binding and lets
     you enter commands (default: yes). The ````` key is used to show the
     console by default, and ``ESC`` to hide it again.
@@ -5482,13 +5482,18 @@ them.
 
     ``ewa_lanczossharp``
         A slightly sharpened version of ``ewa_lanczos``. This is the default
-        when using the ``high-quality`` profile.
+        when using the ``high-quality`` profile. Blur value determined by method
+        originally developed by Nicolas Robidoux for Image Magick, see:
+        https://www.imagemagick.org/discourse-server/viewtopic.php?p=89068#p89068
 
     ``ewa_lanczos4sharpest``
         Very sharp scaler, but also slightly slower than ``ewa_lanczossharp``.
         Prone to ringing, so it's recommended to combine this with an
         anti-ringing shader. On ``--vo=gpu-next``, setting this filter enables
         built-in anti-ringing, so no extra action needs to be taken.
+
+        For more details, see:
+        https://www.imagemagick.org/discourse-server/viewtopic.php?p=128587#p128587
 
     ``mitchell``
         Mitchell-Netravali. Piecewise cubic filter with a support of radius 2.0.
@@ -5604,6 +5609,17 @@ them.
     Note that this doesn't affect the special filters ``bilinear`` and
     ``bicubic_fast``, nor does it affect any polar (EWA) scalers.
 
+    On ``--vo=gpu-next``, this also affects polar (EWA) scalers. Certain
+    filter aliases may also implicitly enable antiringing, regardless of this
+    setting (see ``--scale``).
+
+    .. note::
+
+        When downscaling with separable (orthogonal) filters, setting
+        ``--dscale-antiring`` to a value other than 0.0 (default) will reduce
+        scaler quality and produce aliasing artifacts. On ``--vo=gpu-next``,
+        ``--dscale-antiring`` is disabled for separable (orthogonal) filters.
+
 ``--scale-window=<window>``, ``--cscale-window=<window>``, ``--dscale-window=<window>``, ``--tscale-window=<window>``
     (Advanced users only) Choose a custom windowing function for the kernel.
     Defaults to the filter's preferred window if unset. Use
@@ -5658,6 +5674,9 @@ them.
     ringing artifacts. Enabled by default. This is incompatible with and replaces
     ``--linear-upscaling``. (Note that sigmoidization also requires
     linearization, so the ``LINEAR`` rendering step fires in both cases)
+
+    For more information about sigmoidization, see:
+    https://imagemagick.org/Usage/resize/#resize_sigmoidal
 
 ``--sigmoid-center``
     The center of the sigmoid curve used for ``--sigmoid-upscaling``, must be a
@@ -6581,6 +6600,21 @@ them.
     Enables the default menu bar shortcuts (default: yes). The menu bar shortcuts always take
     precedence over any other shortcuts, they are not propagated to the mpv core and they can't be
     used in config files like ``input.conf`` or script bindings.
+
+``--macos-bundle-path=path1,path2,...``
+    App Bundles operate in their own shell environment that is different from the one in the
+    terminal. The default PATH variable for all Bundles is ``/usr/bin:/bin:/usr/sbin:/sbin``.
+    Because of that mpv can not find binaries installed by package manager that might be used in
+    scripts for example. This option prepends all given paths to the default Bundle PATH.
+
+    Default value in following order:
+
+    :/usr/local/bin:     homebrew (Intel) install path
+    :/usr/local/sbin:    homebrew (Intel) install path
+    :/opt/local/bin:     MacPorts install path
+    :/opt/local/sbin:    MacPorts install path
+    :/opt/homebrew/bin:  homebrew (ARM) install path
+    :/opt/homebrew/sbin: homebrew (ARM) install path
 
 ``--android-surface-size=<WxH>``
     Set dimensions of the rendering surface used by the Android gpu context.
