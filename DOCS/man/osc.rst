@@ -31,24 +31,27 @@ The Interface
 pl prev
     =============   ================================================
     left-click      play previous file in playlist
-    right-click     show playlist
-    shift+L-click   show playlist
+    right-click     show the playlist
+    shift+L-click   show the playlist
+    middle-click    show the playlist
     =============   ================================================
 
 pl next
     =============   ================================================
     left-click      play next file in playlist
-    right-click     show playlist
-    shift+L-click   show playlist
+    right-click     show the playlist
+    shift+L-click   show the playlist
+    middle-click    show the playlist
     =============   ================================================
 
 title
-    | Displays current media-title, filename, custom title, or target chapter
-      name while hovering the seekbar.
+    | Displays the current playlist position and media-title, filename or custom
+      title, or the target chapter name while hovering the seekbar.
 
     =============   ================================================
-    left-click      show playlist position and length and full title
-    right-click     show filename
+    left-click      open the playlist selector
+    middle-click    show the filename
+    right-click     show file and track info
     =============   ================================================
 
 cache
@@ -57,19 +60,20 @@ cache
 play
     =============   ================================================
     left-click      toggle play/pause
+    right-click     toggle infinite looping
     =============   ================================================
 
 skip back
     =============   ================================================
     left-click      go to beginning of chapter / previous chapter
-    right-click     show chapters
+    right-click     open the chapter selector
     shift+L-click   show chapters
     =============   ================================================
 
 skip frwd
     =============   ================================================
     left-click      go to next chapter
-    right-click     show chapters
+    right-click     open the chapter selector
     shift+L-click   show chapters
     =============   ================================================
 
@@ -85,6 +89,7 @@ seekbar
 
     =============   ================================================
     left-click      seek to position
+    right-click     seek to the nearest chapter
     mouse wheel     seek forward/backward
     =============   ================================================
 
@@ -99,22 +104,30 @@ audio and sub
     | Displays selected track and amount of available tracks
 
     =============   ================================================
-    left-click      cycle audio/sub tracks forward
-    right-click     cycle audio/sub tracks backwards
+    left-click      open the audio/sub track selector
     shift+L-click   show available audio/sub tracks
+    middle-click    show available audio/sub tracks
+    right-click     show available audio/sub tracks
     mouse wheel     cycle audio/sub tracks forward/backwards
     =============   ================================================
 
 vol
     =============   ================================================
     left-click      toggle mute
+    right-click     open the audio device selector
     mouse wheel     volume up/down
     =============   ================================================
 
 fs
     =============   ================================================
     left-click      toggle fullscreen
+    right-click     toggle whether the window is maximized
     =============   ================================================
+
+Since mpv 0.40.0, it is possible to configure the commands to run with mouse
+actions on some interface elements, and the default behaviors of several
+elements were changed. If you miss some older behaviors, look at
+``etc/restore-osc-bindings.conf`` in the mpv git repository.
 
 Key Bindings
 ~~~~~~~~~~~~
@@ -287,7 +300,7 @@ Configurable Options
     Duration of fade out in ms, 0 = no fade
 
 ``title``
-    Default: ${media-title}
+    Default: ${!playlist-count==1:[${playlist-pos-1}/${playlist-count}] }${media-title}
 
     String that supports property expansion that will be displayed as
     OSC title.
@@ -402,12 +415,6 @@ Configurable Options
     Update chapter markers positions on duration changes, e.g. live streams.
     The updates are unoptimized - consider disabling it on very low-end systems.
 
-``chapters_osd``, ``playlist_osd``
-    Default: yes
-
-    Whether to display the chapters/playlist at the OSD when left-clicking the
-    next/previous OSC buttons, respectively.
-
 ``chapter_fmt``
     Default: ``Chapter: %s``
 
@@ -486,6 +493,80 @@ Configurable Options
 
     Use display fps to calculate the interval between OSC redraws.
 
+The following options configure what commands are run when the buttons are
+clicked. ``mbtn_mid`` commands are also triggered with ``shift+mbtn_left``.
+
+``title_mbtn_left_command=script-binding select/select-playlist; script-message-to osc osc-hide``
+
+``title_mbtn_mid_command=show-text ${filename}``
+
+``title_mbtn_right_command=script-binding stats/display-page-5``
+
+``playlist_prev_mbtn_left_command=playlist-prev; show-text ${playlist} 3000``
+
+``playlist_prev_mbtn_mid_command=show-text ${playlist} 3000``
+
+``playlist_prev_mbtn_right_command=show-text ${playlist} 3000``
+
+``playlist_next_mbtn_left_command=playlist-next; show-text ${playlist} 3000``
+
+``playlist_next_mbtn_mid_command=show-text ${playlist} 3000``
+
+``playlist_next_mbtn_right_command=show-text ${playlist} 3000``
+
+``play_pause_mbtn_left_command=cycle pause``
+
+``play_pause_mbtn_mid_command=``
+
+``play_pause_mbtn_right_command=cycle-values loop-file inf no``
+
+``chapter_prev_mbtn_left_command=osd-msg add chapter -1``
+
+``chapter_prev_mbtn_mid_command=show-text ${chapter-list} 3000``
+
+``chapter_prev_mbtn_right_command=script-binding select/select-chapter; script-message-to osc osc-hide``
+
+``chapter_next_mbtn_left_command=osd-msg add chapter 1``
+
+``chapter_next_mbtn_mid_command=show-text ${chapter-list} 3000``
+
+``chapter_next_mbtn_right_command=script-binding select/select-chapter; script-message-to osc osc-hide``
+
+``audio_track_mbtn_left_command=script-binding select/select-aid; script-message-to osc osc-hide``
+
+``audio_track_mbtn_mid_command=show-text ${track-list/audio} 3000``
+
+``audio_track_mbtn_right_command=cycle audio``
+
+``audio_track_wheel_down_command=cycle audio``
+
+``audio_track_wheel_up_command=cycle audio down``
+
+``sub_track_mbtn_left_command=script-binding select/select-sid; script-message-to osc osc-hide``
+
+``sub_track_mbtn_mid_command=show-text ${track-list/sub} 3000``
+
+``sub_track_mbtn_right_command=cycle sub``
+
+``sub_track_wheel_down_command=cycle sub``
+
+``sub_track_wheel_up_command=cycle sub down``
+
+``volume_mbtn_left_command=no-osd cycle mute``
+
+``volume_mbtn_mid_command=``
+
+``volume_mbtn_right_command=script-binding select/select-audio-device; script-message-to osc osc-hide``
+
+``volume_wheel_down_command=add volume -5``
+
+``volume_wheel_up_command=add volume 5``
+
+``fullscreen_mbtn_left_command="cycle fullscreen"``
+
+``fullscreen_mbtn_mid_command=``
+
+``fullscreen_mbtn_right_command="cycle window-maximized"``
 
 Script Commands
 ~~~~~~~~~~~~~~~
@@ -499,6 +580,9 @@ in ``input.conf``, or sent by other scripts.
 
 ``osc-show``
     Triggers the OSC to show up, just as if user moved mouse.
+
+``osc-hide``
+    Hide the OSC when ``visibility`` is ``auto``.
 
 Example
 

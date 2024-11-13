@@ -76,8 +76,6 @@
 #include "osdep/subprocess.h"
 #include "osdep/terminal.h"
 
-#include "core.h"
-
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -159,15 +157,11 @@ struct load_action {
     bool play;
 };
 
-// U+25CB WHITE CIRCLE
-// U+25CF BLACK CIRCLE
 // U+00A0 NO-BREAK SPACE
-#define WHITECIRCLE "\xe2\x97\x8b"
-#define BLACKCIRCLE "\xe2\x97\x8f"
 #define NBSP "\xc2\xa0"
 
-const char list_current[] = BLACKCIRCLE NBSP;
-const char list_normal[] = WHITECIRCLE NBSP;
+const char list_current[] = BLACK_CIRCLE NBSP;
+const char list_normal[] = WHITE_CIRCLE NBSP;
 
 static int edit_filters(struct MPContext *mpctx, struct mp_log *log,
                         enum stream_type mediatype,
@@ -222,7 +216,9 @@ static int invoke_hook_handler(struct MPContext *mpctx, struct hook_handler *h)
     char *name = mp_tprintf(22, "@%"PRIi64, h->client_id);
     int r = mp_client_send_event(mpctx, name, reply_id, MPV_EVENT_HOOK, m);
     if (r < 0) {
-        MP_WARN(mpctx, "Sending hook command failed. Removing hook.\n");
+        MP_MSG(mpctx, mp_client_id_exists(mpctx, h->client_id) ? MSGL_WARN : MSGL_V,
+               "Failed sending hook command %s/%s. Removing hook.\n", h->client,
+               h->type);
         hook_remove(mpctx, h);
         mp_wakeup_core(mpctx); // repeat next iteration to finish
     }
@@ -1942,20 +1938,10 @@ static int property_switch_track(void *ctx, struct m_property *prop,
         return M_PROPERTY_OK;
     case M_PROPERTY_PRINT:
         if (track) {
-            char *lang = track->lang;
-            if (!lang && type != STREAM_VIDEO) {
-                lang = "unknown";
-            } else if (!lang) {
-                lang = "";
-            }
-
-            if (track->title) {
-                *(char **)arg = talloc_asprintf(NULL, "(%d) %s (\"%s\")",
-                                           track->user_tid, lang, track->title);
-            } else {
-                *(char **)arg = talloc_asprintf(NULL, "(%d) %s",
-                                                track->user_tid, lang);
-            }
+            void *talloc_ctx = talloc_new(NULL);
+            *(char **)arg = talloc_asprintf(NULL, "(%d) %s", track->user_tid,
+                mp_format_track_metadata(talloc_ctx, track, true));
+            talloc_free(talloc_ctx);
         } else {
             const char *msg = "no";
             if (!mpctx->playback_initialized &&
@@ -2104,20 +2090,74 @@ static const char *track_type_name(struct track *t)
     return NULL;
 }
 
-
 static char *append_track_info(char *res, struct track *track)
 {
     res = talloc_strdup_append(res, track->selected ? list_current : list_normal);
     res = talloc_asprintf_append(res, "(%d) ", track->user_tid);
-    if (track->title)
-        res = talloc_asprintf_append(res, "'%s' ", track->title);
-    if (track->lang)
-        res = talloc_asprintf_append(res, "(%s) ", track->lang);
-    if (track->is_external)
-        res = talloc_asprintf_append(res, "(external) ");
-    res = talloc_asprintf_append(res, "\n");
+    res = talloc_strdup_append(res, mp_format_track_metadata(res, track, true));
 
     return res;
+}
+
+#define bstr_xappend0(ctx, dst, s) bstr_xappend(ctx, dst, bstr0(s))
+#define ADD_FLAG(ctx, dst, flag, first) do {                           \
+    bstr_xappend_asprintf(ctx, &dst, " %s%s", first ? "[" : "", flag); \
+    first = false;                                                     \
+} while(0)
+
+char *mp_format_track_metadata(void *ctx, struct track *t, bool add_lang)
+{
+    struct sh_stream *s = t->stream;
+    bstr dst = {0};
+
+    if (t->title)
+        bstr_xappend_asprintf(ctx, &dst, "'%s' ", t->title);
+
+    const char *codec = s ? s->codec->codec : NULL;
+
+    bstr_xappend0(ctx, &dst, "(");
+
+    if (add_lang && t->lang)
+        bstr_xappend_asprintf(ctx, &dst, "%s ", t->lang);
+
+    bstr_xappend0(ctx, &dst, codec ? codec : "<unknown>");
+
+    if (s && s->codec->codec_profile)
+        bstr_xappend_asprintf(ctx, &dst, " [%s]", s->codec->codec_profile);
+    if (s && s->codec->disp_w)
+        bstr_xappend_asprintf(ctx, &dst, " %dx%d", s->codec->disp_w, s->codec->disp_h);
+    if (s && s->codec->fps && !t->image) {
+        char *fps = mp_format_double(ctx, s->codec->fps, 4, false, false, true);
+        bstr_xappend_asprintf(ctx, &dst, " %s fps", fps);
+    }
+    if (s && s->codec->channels.num)
+        bstr_xappend_asprintf(ctx, &dst, " %dch", s->codec->channels.num);
+    if (s && s->codec->samplerate)
+        bstr_xappend_asprintf(ctx, &dst, " %d Hz", s->codec->samplerate);
+    if (s && s->codec->bitrate) {
+        bstr_xappend_asprintf(ctx, &dst, " %d kbps", (s->codec->bitrate + 500) / 1000);
+    } else if (s && s->hls_bitrate) {
+        bstr_xappend_asprintf(ctx, &dst, " %d kbps", (s->hls_bitrate + 500) / 1000);
+    }
+    bstr_xappend0(ctx, &dst, ")");
+
+    bool first = true;
+    if (t->default_track)
+        ADD_FLAG(ctx, dst, "default", first);
+    if (t->forced_track)
+        ADD_FLAG(ctx, dst, "forced", first);
+    if (t->dependent_track)
+        ADD_FLAG(ctx, dst, "dependent", first);
+    if (t->visual_impaired_track)
+        ADD_FLAG(ctx, dst, "visual-impaired", first);
+    if (t->hearing_impaired_track)
+        ADD_FLAG(ctx, dst, "hearing-impaired", first);
+    if (t->is_external)
+        ADD_FLAG(ctx, dst, "external", first);
+    if (!first)
+        bstr_xappend0(ctx, &dst, "]");
+
+    return bstrto0(ctx, dst);
 }
 
 static int property_list_tracks(void *ctx, struct m_property *prop,
@@ -2125,25 +2165,35 @@ static int property_list_tracks(void *ctx, struct m_property *prop,
 {
     MPContext *mpctx = ctx;
     if (action == M_PROPERTY_PRINT) {
-        char *res = NULL;
+        char *res = talloc_strdup(NULL, "");
 
         for (int type = 0; type < STREAM_TYPE_COUNT; type++) {
+            bool found = false;
+
             for (int n = 0; n < mpctx->num_tracks; n++) {
                 struct track *track = mpctx->tracks[n];
                 if (track->type == type) {
                     res = talloc_asprintf_append(res, "%s: ", track_type_name(track));
                     res = append_track_info(res, track);
+                    res = talloc_asprintf_append(res, "\n");
+                    found = true;
                 }
             }
 
-            res = talloc_asprintf_append(res, "\n");
+            if (found && type < STREAM_TYPE_COUNT - 1) {
+                res = talloc_asprintf_append(res, "\n");
+                found = false;
+            }
         }
 
         struct demuxer *demuxer = mpctx->demuxer;
-        if (demuxer && demuxer->num_editions > 1)
-            res = talloc_asprintf_append(res, "\nEdition: %d of %d\n",
-                                        demuxer->edition + 1,
-                                        demuxer->num_editions);
+        if (demuxer && demuxer->num_editions > 1) {
+            res = talloc_asprintf_append(res, "\nEdition: %d of %d",
+                                         demuxer->edition + 1,
+                                         demuxer->num_editions);
+        } else {
+            res[strlen(res) - 1] = '\0';
+        }
 
         *(char **)arg = res;
         return M_PROPERTY_OK;
@@ -2169,12 +2219,14 @@ static int property_list_tracks(void *ctx, struct m_property *prop,
                     *(struct m_option *)ka->arg = (struct m_option){.type = CONF_TYPE_STRING};
                     return M_PROPERTY_OK;
                 case M_PROPERTY_PRINT:
-                    res = talloc_asprintf(NULL, "Available %s tracks:\n",
+                    res = talloc_asprintf(NULL, "Available %s tracks:",
                               type == STREAM_SUB ? "subtitle" : stream_type_name(type));
 
                     for (int n = 0; n < mpctx->num_tracks; n++) {
-                        if (mpctx->tracks[n]->type == type)
+                        if (mpctx->tracks[n]->type == type) {
+                            res = talloc_strdup_append(res, "\n");
                             res = append_track_info(res, mpctx->tracks[n]);
+                        }
                     }
 
                     *(char **)ka->arg = res;
@@ -6499,7 +6551,7 @@ static void cmd_delete_watch_later_config(void *p)
     struct MPContext *mpctx = cmd->mpctx;
 
     char *filename = cmd->args[0].v.s;
-    if (filename && !*filename)
+    if (filename && !filename[0])
         filename = NULL;
     mp_delete_watch_later_conf(mpctx, filename);
 }
@@ -6562,7 +6614,7 @@ static void cmd_key(void *p)
     } else {
         int code = mp_input_get_key_from_name(key_name);
         if (code < 0) {
-            MP_ERR(mpctx, "%s is not a valid input name.\n", key_name);
+            MP_ERR(mpctx, "'%s' is not a valid input name.\n", key_name);
             cmd->success = false;
             return;
         }
@@ -6576,14 +6628,15 @@ static void cmd_key_bind(void *p)
     struct mp_cmd_ctx *cmd = p;
     struct MPContext *mpctx = cmd->mpctx;
 
-    int code = mp_input_get_key_from_name(cmd->args[0].v.s);
-    if (code < 0) {
-        MP_ERR(mpctx, "%s is not a valid input name.\n", cmd->args[0].v.s);
-        cmd->success = false;
-        return;
-    }
+    const char *key = cmd->args[0].v.s;
     const char *target_cmd = cmd->args[1].v.s;
-    mp_input_bind_key(mpctx->input, code, bstr0(target_cmd));
+    const char *comment = cmd->args[2].v.s;
+    if (comment && !comment[0])
+        comment = NULL;
+    if (!mp_input_bind_key(mpctx->input, key, bstr0(target_cmd), comment)) {
+        MP_ERR(mpctx, "'%s' is not a valid input name.\n", key);
+        cmd->success = false;
+    }
 }
 
 static void cmd_apply_profile(void *p)
@@ -7194,7 +7247,8 @@ const struct mp_cmd_def mp_cmds[] = {
                                 {"single", 0}, {"double", 1}),
                                 .flags = MP_CMD_OPT_ARG}}},
     { "keybind", cmd_key_bind, { {"name", OPT_STRING(v.s)},
-                                 {"cmd", OPT_STRING(v.s)} }},
+                                 {"cmd", OPT_STRING(v.s)},
+                                 {"comment", OPT_STRING(v.s), .flags = MP_CMD_OPT_ARG} }},
     { "keypress", cmd_key, { {"name", OPT_STRING(v.s)},
                              {"scale", OPT_DOUBLE(v.d), OPTDEF_DOUBLE(1)} },
         .priv = &(const int){0}},

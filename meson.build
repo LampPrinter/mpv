@@ -935,9 +935,11 @@ if features['direct3d']
 endif
 
 drm = dependency('libdrm', version: '>= 2.4.105', required: get_option('drm'))
-features += {'drm': drm.found() and (features['vt.h'] or features['consio.h'] or features['wsdisplay-usl-io.h'])}
+libdisplay_info = dependency('libdisplay-info', version: '>= 0.1.1', required: get_option('drm'))
+features += {'drm': drm.found() and libdisplay_info.found() and
+             (features['vt.h'] or features['consio.h'] or features['wsdisplay-usl-io.h'])}
 if features['drm']
-    dependencies += drm
+    dependencies += [drm, libdisplay_info]
     sources += files('video/drmprime.c',
                      'video/out/drm_atomic.c',
                      'video/out/drm_common.c',
@@ -1779,7 +1781,8 @@ if get_option('cplayer')
     confdir = get_option('sysconfdir')
 
     conf_files = ['etc/mpv.conf', 'etc/input.conf',
-                  'etc/mplayer-input.conf', 'etc/restore-old-bindings.conf']
+                  'etc/mplayer-input.conf', 'etc/restore-old-bindings.conf',
+                  'etc/restore-osc-bindings.conf']
     install_data(conf_files, install_dir: join_paths(datadir, 'doc', 'mpv'))
 
     bash_install_dir = join_paths(datadir, 'bash-completion', 'completions')
