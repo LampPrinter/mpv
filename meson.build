@@ -173,6 +173,10 @@ sources = files(
     'player/sub.c',
     'player/video.c',
 
+    ## clipboard
+    'player/clipboard/clipboard.c',
+    'player/clipboard/clipboard-vo.c',
+
     ## Streams
     'stream/cookies.c',
     'stream/stream.c',
@@ -257,7 +261,7 @@ sources = files(
     ## tree_allocator
     'ta/ta.c',
     'ta/ta_talloc.c',
-    'ta/ta_utils.c'
+    'ta/ta_utils.c',
 )
 
 
@@ -525,6 +529,7 @@ if features['win32-desktop']
         sources += files('osdep/subprocess-dummy.c')
     endif
     sources += files('input/ipc-win.c',
+                     'player/clipboard/clipboard-win.c',
                      'osdep/language-win.c',
                      'osdep/terminal-win.c',
                      'video/out/w32_common.c',
@@ -1534,7 +1539,7 @@ endif
 xcrun = find_program('xcrun', required: get_option('swift-build').require(darwin))
 swift_ver = '0.0'
 if xcrun.found()
-    swift_prog = find_program(run_command(xcrun, '-find', 'swift', check: true).stdout().strip())
+    swift_prog = find_program(run_command(xcrun, '-find', 'swiftc', check: true).stdout().strip())
     swift_ver_string = run_command(swift_prog, '-version', check: true).stdout()
     verRe = '''
 #!/usr/bin/env python3
