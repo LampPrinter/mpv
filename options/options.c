@@ -150,6 +150,7 @@ static const m_option_t mp_vo_opt_list[] = {
     {"fs", OPT_ALIAS("fullscreen")},
     {"input-cursor-passthrough", OPT_BOOL(cursor_passthrough)},
     {"native-keyrepeat", OPT_BOOL(native_keyrepeat)},
+    {"input-ime", OPT_BOOL(input_ime)},
     {"panscan", OPT_FLOAT(panscan), M_RANGE(0.0, 1.0)},
     {"video-zoom", OPT_FLOAT(zoom), M_RANGE(-20.0, 20.0)},
     {"video-pan-x", OPT_FLOAT(pan_x)},
@@ -259,6 +260,7 @@ const struct m_sub_options vo_sub_opts = {
         .keepaspect = true,
         .keepaspect_window = true,
         .native_fs = true,
+        .input_ime = true,
         .taskbar_progress = true,
         .show_in_taskbar = true,
         .border = true,
@@ -298,6 +300,7 @@ const struct m_sub_options mp_subtitle_sub_opts = {
         {"sub-gray", OPT_BOOL(sub_gray)},
         {"sub-ass", OPT_BOOL(ass_enabled), .flags = UPDATE_SUB_HARD},
         {"sub-scale", OPT_FLOAT(sub_scale), M_RANGE(0, 100)},
+        {"sub-scale-signs", OPT_BOOL(sub_scale_signs)},
         {"sub-line-spacing", OPT_FLOAT(sub_line_spacing), M_RANGE(-1000, 1000)},
         {"sub-ass-line-spacing", OPT_REPLACED("sub-line-spacing")},
         {"sub-use-margins", OPT_BOOL(sub_use_margins)},
@@ -517,8 +520,7 @@ static const m_option_t mp_opts[] = {
         {"idle",        IDLE_PRIORITY_CLASS}),
         .flags = UPDATE_PRIORITY},
 #endif
-    {"media-controls", OPT_CHOICE(media_controls,
-        {"no", 0}, {"player", 1}, {"yes", 2})},
+    {"media-controls", OPT_BOOL(media_controls)},
     {"config", OPT_BOOL(load_config), .flags = M_OPT_PRE_PARSE},
     {"config-dir", OPT_STRING(force_configdir),
         .flags = M_OPT_NOCFG | M_OPT_PRE_PARSE | M_OPT_FILE},
@@ -634,7 +636,7 @@ static const m_option_t mp_opts[] = {
     {"prefetch-playlist", OPT_BOOL(prefetch_open)},
     {"cache-pause", OPT_BOOL(cache_pause)},
     {"cache-pause-initial", OPT_BOOL(cache_pause_initial)},
-    {"cache-pause-wait", OPT_FLOAT(cache_pause_wait), M_RANGE(0, DBL_MAX)},
+    {"cache-pause-wait", OPT_FLOAT(cache_pause_wait), M_RANGE(0, FLT_MAX)},
 
 #if HAVE_DVBIN
     {"dvbin", OPT_SUBSTRUCT(stream_dvb_opts, stream_dvb_conf)},
@@ -704,6 +706,8 @@ static const m_option_t mp_opts[] = {
     {"cover-art-auto-exts", OPT_ALIAS("image-exts")},
     {"cover-art-whitelist", OPT_STRINGLIST(coverart_whitelist)},
     {"video-exts", OPT_STRINGLIST(video_exts)},
+    {"archive-exts", OPT_STRINGLIST(archive_exts)},
+    {"playlist-exts", OPT_STRINGLIST(playlist_exts)},
 
     {"", OPT_SUBSTRUCT(subs_rend, mp_subtitle_sub_opts)},
     {"", OPT_SUBSTRUCT(subs_shared, mp_subtitle_shared_sub_opts)},
@@ -1024,7 +1028,7 @@ static const struct MPOpts mp_default_opts = {
     .osd_bar_visible = true,
     .screenshot_template = "mpv-shot%n",
     .play_dir = 1,
-    .media_controls = 1,
+    .media_controls = true,
     .video_exts = (char *[]){
         "3g2", "3gp", "avi", "flv", "m2ts", "m4v", "mj2", "mkv", "mov", "mp4",
         "mpeg", "mpg", "ogv", "rmvb", "ts", "webm", "wmv", "y4m", NULL
@@ -1036,6 +1040,12 @@ static const struct MPOpts mp_default_opts = {
     .image_exts = (char *[]){
         "avif", "bmp", "gif", "heic", "heif", "j2k", "jp2", "jpeg", "jpg",
         "jxl", "png", "qoi", "svg", "tga", "tif", "tiff", "webp", NULL
+    },
+    .archive_exts = (char *[]){
+        "zip", "rar", "7z", "cbz", "cbr", NULL
+    },
+    .playlist_exts = (char *[]){
+        "m3u", "m3u8", "pls", "edl", NULL
     },
 
     .sub_auto_exts = (char *[]){

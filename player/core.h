@@ -510,6 +510,7 @@ void audio_start_ao(struct MPContext *mpctx);
 void mp_parse_cfgfiles(struct MPContext *mpctx);
 void mp_load_auto_profiles(struct MPContext *mpctx);
 bool mp_load_playback_resume(struct MPContext *mpctx, const char *file);
+char *mp_get_playback_resume_dir(struct MPContext *mpctx);
 void mp_write_watch_later_conf(struct MPContext *mpctx);
 void mp_delete_watch_later_conf(struct MPContext *mpctx, const char *file);
 struct playlist_entry *mp_check_playlist_resume(struct MPContext *mpctx,
@@ -539,7 +540,7 @@ struct track *mp_track_by_tid(struct MPContext *mpctx, enum stream_type type,
 void add_demuxer_tracks(struct MPContext *mpctx, struct demuxer *demuxer);
 bool mp_remove_track(struct MPContext *mpctx, struct track *track);
 struct playlist_entry *mp_next_file(struct MPContext *mpctx, int direction,
-                                    bool force);
+                                    bool force, bool update_loop);
 void mp_set_playlist_entry(struct MPContext *mpctx, struct playlist_entry *e);
 void mp_play_files(struct MPContext *mpctx);
 void update_demuxer_properties(struct MPContext *mpctx);

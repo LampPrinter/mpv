@@ -1049,7 +1049,7 @@ static void add_double(const m_option_t *opt, void *val, double add, bool wrap)
 
 static void multiply_double(const m_option_t *opt, void *val, double f)
 {
-    *(double *)val *= f;
+    VAL(val) *= f;
     clamp_double(opt, val);
 }
 
@@ -1066,14 +1066,14 @@ static int double_set(const m_option_t *opt, void *dst, struct mpv_node *src)
     }
     if (clamp_double(opt, &val) < 0)
         return M_OPT_OUT_OF_RANGE;
-    *(double *)dst = val;
+    VAL(dst) = val;
     return 1;
 }
 
 static int double_get(const m_option_t *opt, void *ta_parent,
                       struct mpv_node *dst, void *src)
 {
-    double f = *(double *)src;
+    double f = VAL(src);
     if (isnan(f) && (opt->flags & M_OPT_DEFAULT_NAN)) {
         dst->format = MPV_FORMAT_STRING;
         dst->u.string = talloc_strdup(ta_parent, "default");
@@ -1137,11 +1137,36 @@ const m_option_type_t m_option_type_aspect = {
 #undef VAL
 #define VAL(x) (*(float *)(x))
 
+static int clamp_float(const m_option_t *opt, double *val)
+{
+    double v = *val;
+    int r = clamp_double(opt, &v);
+    // Handle the case where range is not set and v is finite
+    // but overflows the float range.
+    if (isfinite(v) && v > FLT_MAX) {
+        v = FLT_MAX;
+        r = M_OPT_OUT_OF_RANGE;
+    }
+    if (isfinite(v) && v < -FLT_MAX) {
+        v = -FLT_MAX;
+        r = M_OPT_OUT_OF_RANGE;
+    }
+    *val = v;
+    return r;
+}
+
 static int parse_float(struct mp_log *log, const m_option_t *opt,
                        struct bstr name, struct bstr param, void *dst)
 {
     double tmp;
     int r = parse_double(log, opt, name, param, &tmp);
+
+    if (r == 1 && clamp_float(opt, &tmp) < 0) {
+        mp_err(log, "The %.*s option is out of range: %.*s\n",
+               BSTR_P(name), BSTR_P(param));
+        return M_OPT_OUT_OF_RANGE;
+    }
+
     if (r == 1 && dst)
         VAL(dst) = tmp;
     return r;
@@ -1163,6 +1188,7 @@ static void add_float(const m_option_t *opt, void *val, double add, bool wrap)
 {
     double tmp = VAL(val);
     add_double(opt, &tmp, add, wrap);
+    clamp_float(opt, &tmp);
     VAL(val) = tmp;
 }
 
@@ -1170,6 +1196,7 @@ static void multiply_float(const m_option_t *opt, void *val, double f)
 {
     double tmp = VAL(val);
     multiply_double(opt, &tmp, f);
+    clamp_float(opt, &tmp);
     VAL(val) = tmp;
 }
 
@@ -1177,6 +1204,8 @@ static int float_set(const m_option_t *opt, void *dst, struct mpv_node *src)
 {
     double tmp;
     int r = double_set(opt, &tmp, src);
+    if (r >= 0 && clamp_double(opt, &tmp) < 0)
+        return M_OPT_OUT_OF_RANGE;
     if (r >= 0)
         VAL(dst) = tmp;
     return r;
@@ -2586,6 +2615,7 @@ static int parse_channels(struct mp_log *log, const m_option_t *opt,
     }
 
     if (dst) {
+        opt->type->free(dst);
         *(struct m_channels *)dst = res;
     } else {
         talloc_free(res.chmaps);
@@ -2672,8 +2702,10 @@ static int parse_timestring(struct bstr str, double *time, char endchar)
     bool neg = bstr_eatstart0(&str, "-");
     if (!neg)
         bstr_eatstart0(&str, "+");
-    if (bstrchr(str, '-') >= 0 || bstrchr(str, '+') >= 0)
-        return 0; /* the timestamp shouldn't contain anymore +/- after this point */
+    bool sci = bstr_find0(str, "e-") >= 0 || bstr_find0(str, "e+") >= 0;
+    /* non-scientific notation timestamps shouldn't contain anymore +/- after this point */
+    if (!sci && (bstrchr(str, '-') >= 0 || bstrchr(str, '+') >= 0))
+        return 0;
     if (bstr_sscanf(str, "%u:%u:%lf%n", &h, &m, &s, &len) >= 3) {
         if (m >= 60 || s >= 60)
             return 0; /* minutes or seconds are out of range */

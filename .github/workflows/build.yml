@@ -181,9 +181,10 @@ jobs:
         run: |
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -ne 'C:\Program Files\LLVM\bin' -and `
                                                              $_ -ne 'C:\Strawberry\c\bin' }) -join ';'
+          $env:PATH += ';C:\Program Files\NASM'
           Import-Module "$env:VS\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $env:VS -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64"
-          meson test -C build mpv:
+          meson test -C build -t 2
 
       - name: Print meson test log
         if: ${{ failure() && steps.tests.outcome == 'failure' }}
@@ -439,7 +440,10 @@ jobs:
                 vulkan-headers \
                 zimg
             ./ci/build-openbsd.sh
-            meson test -C build
+            if ! meson test -C build; then
+                cat ./build/meson-logs/testlog.txt
+                exit 1
+            fi
 
   freebsd:
     runs-on: ubuntu-latest # until https://github.com/actions/runner/issues/385
@@ -489,7 +493,10 @@ jobs:
                 vulkan-headers \
                 wayland-protocols
             ./ci/build-freebsd.sh
-            meson test -C build
+            if ! meson test -C build; then
+                cat ./build/meson-logs/testlog.txt
+                exit 1
+            fi
 
   msys2:
     runs-on: windows-latest

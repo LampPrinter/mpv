@@ -8,7 +8,7 @@ if (-not (Test-Path $subprojects)) {
 
 # Wrap shaderc to run git-sync-deps and patch unsupported generator expression
 if (-not (Test-Path "$subprojects/shaderc_cmake")) {
-    git clone https://github.com/google/shaderc --depth 1 -b v2024.3 $subprojects/shaderc_cmake
+    git clone https://github.com/google/shaderc --depth 1 $subprojects/shaderc_cmake
     Set-Content -Path "$subprojects/shaderc_cmake/p.diff" -Value @'
 diff --git a/third_party/CMakeLists.txt b/third_party/CMakeLists.txt
 index d44f62a..54d4719 100644
@@ -205,7 +205,7 @@ meson setup build `
     -Dtests=true `
     -Dgpl=true `
     -Dffmpeg:gpl=enabled `
-    -Dffmpeg:tests=disabled `
+    -Dffmpeg:tests=enabled `
     -Dffmpeg:programs=disabled `
     -Dffmpeg:sdl2=disabled `
     -Dffmpeg:vulkan=auto `
@@ -214,11 +214,13 @@ meson setup build `
     -Dlcms2:fastfloat=true `
     -Dlcms2:jpeg=disabled `
     -Dlcms2:tiff=disabled `
+    -Dlibass:test=enabled `
     -Dlibusb:tests=false `
     -Dlibusb:examples=false `
     -Dlibplacebo:demos=false `
     -Dlibplacebo:lcms=enabled `
     -Dlibplacebo:shaderc=enabled `
+    -Dlibplacebo:tests=true `
     -Dlibplacebo:vulkan=enabled `
     -Dlibplacebo:d3d11=enabled `
     -Dxxhash:inline-all=true `
