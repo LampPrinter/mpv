@@ -95,6 +95,9 @@ Shift+Ctrl+BACKSPACE
 ENTER
     Go forward in the playlist.
 
+Shift+HOME and Shift+END
+    Go to the first/last playlist entry.
+
 p and SPACE
     Pause (pressing again unpauses).
 
@@ -146,7 +149,8 @@ T
 
 w and W
     Decrease/increase pan-and-scan range. The ``e`` key does the same as
-    ``W`` currently, but use is discouraged.
+    ``W`` currently, but use is discouraged. See ``--panscan`` for more
+    information.
 
 o and P
     Show progression bar, elapsed time and total duration on the OSD.
@@ -202,6 +206,9 @@ S
 Ctrl+s
     Take a screenshot, as the window shows it (with subtitles, OSD, and scaled
     video).
+
+HOME
+    Seek to the beginning of the file.
 
 PGUP and PGDWN
     Seek to the beginning of the previous/next chapter. In most cases,
@@ -289,13 +296,13 @@ Alt+2 (and Command+2 on macOS)
 Command + f (macOS only)
     Toggle fullscreen (see also ``--fs``).
 
-(The following keybindings open a selector in the console that lets you choose
-from a list of items by typing part of the desired item, by clicking the desired
+(The following keybindings open a menu in the console that lets you choose from
+a list of items by typing part of the desired item, by clicking the desired
 item, or by navigating them with keybindings: ``Down`` and ``Ctrl+n`` go down,
 ``Up`` and ``Ctrl+p`` go up, ``Page down`` and ``Ctrl+f`` scroll down one page,
 and ``Page up`` and ``Ctrl+b`` scroll up one page.)
 
-In track selectors, selecting the current tracks disables it.
+In track menus, selecting the current tracks disables it.
 
 g-p
     Select a playlist entry.
@@ -328,16 +335,23 @@ g-l
 g-d
     Select an audio device.
 
+g-h
+    Select a file from the watch history. Requires ``--save-watch-history``.
+
 g-w
     Select a file from watch later config files (see `RESUMING PLAYBACK`_) to
-    resume playing. Requires ``--write-filename-in-watch-later-config``. This
-    doesn't work with ``--ignore-path-in-watch-later-config``.
+    resume playing. Requires ``--write-filename-in-watch-later-config``.
 
 g-b
     Select a defined input binding.
 
 g-r
     Show the values of all properties.
+
+g-m, MENU, Ctrl+p
+    Show a menu with miscellaneous entries.
+
+See `SELECT`_ for more information.
 
 (The following keys are valid if you have a keyboard with multimedia keys.)
 
@@ -359,11 +373,18 @@ in the mpv git repository.
 Mouse Control
 -------------
 
+Ctrl+left click
+    Pan while holding the button, keeping the clicked part of the video under
+    the cursor.
+
 Left double click
     Toggle fullscreen on/off.
 
 Right click
     Toggle pause on/off.
+
+Middle click
+    Pan through the whole video while holding the button.
 
 Forward/Back button
     Skip to next/previous entry in playlist.
@@ -375,7 +396,8 @@ Wheel left/right
     Seek forward/backward 10 seconds.
 
 Ctrl+Wheel up/down
-    Change video zoom.
+    Change video zoom keeping the part of the video hovered by the cursor under
+    it.
 
 Context Menu
 -------------
@@ -646,6 +668,7 @@ Suffix        Meaning
 -add          Append 1 or more items (same syntax as -set)
 -pre          Prepend 1 or more items (same syntax as -set)
 -clr          Clear the option (remove all items)
+-del          Delete 1 or more items if present (same syntax as -set)
 -remove       Delete item if present (does not interpret escapes)
 -toggle       Append an item, or remove it if it already exists (no escapes)
 ============= ===============================================
@@ -668,6 +691,8 @@ Suffix        Meaning
 -set          Set a list of items (using ``,`` as separator)
 -append       Append a single item (escapes for the key, no escapes for the value)
 -add          Append 1 or more items (same syntax as -set)
+-clr          Clear the option (remove all items)
+-del          Delete 1 or more keys if present (same syntax as -set)
 -remove       Delete item by key if present (does not interpret escapes)
 ============= ===============================================
 
@@ -697,7 +722,7 @@ Suffix        Meaning
 -add          Append 1 or more items (same syntax as -set)
 -pre          Prepend 1 or more items (same syntax as -set)
 -clr          Clear the option (remove all items)
--remove       Delete item if present
+-remove       Delete 1 or items if present (same syntax as -set)
 -toggle       Append an item, or remove it if it already exists
 -help         Pseudo operation that prints a help text to the terminal
 ============= ===============================================
@@ -707,10 +732,9 @@ General
 
 Without suffix, the operation used is normally ``-set``.
 
-Although some operations allow specifying multiple items, using this is strongly
-discouraged and deprecated, except for ``-set``. There is a chance that
-operations like ``-add`` and ``-pre`` will work like ``-append`` and accept a
-single, unescaped item only (so the ``,`` separator will not be interpreted and
+Some operations like ``-add`` and ``-pre`` specify multiple items, but be
+aware that you may need to escape the arguments. ``-append`` accepts a single,
+unescaped item only (so the ``,`` separator will not be interpreted and
 is passed on as part of the value).
 
 Some options (like ``--sub-file``, ``--audio-file``, ``--glsl-shader``) are
@@ -1328,9 +1352,20 @@ PROTOCOLS
     ``image-2.jpg`` and ``image-10.jpg``, provided that there are no big gaps
     between the files.
 
-``cdda://[device]`` ``--cdrom-device=PATH`` ``--cdda-...``
+``cdda://[device]`` ``--cdda-device=PATH``
 
-    Play CD.
+    Play CD. You can select a specific range of tracks to play by using the
+    ``--start`` and ``--end`` options and specifying chapters. Navigating
+    forwards and backwards through tracks can also be done by navigating through
+    chapters (``PGUP`` and ``PGDOWN`` in the default keybinds).
+
+    .. admonition:: Example
+
+        ::
+
+            mpv cdda:// --start=#4 --end=#6
+
+        This will start from track 4, play track 5, and then end.
 
 ``lavf://...``
 
@@ -1503,6 +1538,10 @@ works like in older mpv releases:
 
 .. include:: console.rst
 
+.. include:: select.rst
+
+.. include:: positioning.rst
+
 .. include:: lua.rst
 
 .. include:: javascript.rst
@@ -1537,10 +1576,7 @@ behavior of mpv.
 
 ``MPV_LEAK_REPORT``
     If set to ``1``, enable internal talloc leak reporting. If set to another
-    value, disable leak reporting. If unset, use the default, which normally is
-    ``0``. If mpv was built with ``--enable-ta-leak-report``, the default is
-    ``1``. If leak reporting was disabled at compile time (``NDEBUG`` in
-    custom ``CFLAGS``), this environment variable is ignored.
+    value, disable leak reporting.
 
 ``LADSPA_PATH``
     Specifies the search path for LADSPA plugins. If it is unset, fully
@@ -1639,6 +1675,22 @@ If errors happen, the following exit codes can be returned:
 Note that quitting the player manually will always lead to exit code 0,
 overriding the exit code that would be returned normally. Also, the ``quit``
 input command can take an exit code: in this case, that exit code is returned.
+
+OPTICAL DRIVES
+==============
+
+Depending on the OS, mpv will choose a different disc device by default.
+This applies for all optical disc playback (CDDA, DVD, and BD).
+
+======= =============
+OS      Default Drive
+======= =============
+Linux   /dev/sr0
+Windows D:
+macOS   /dev/disk1
+FreeBSD /dev/cd0
+OpenBSD /dev/rcd0c
+======= =============
 
 FILES
 =====

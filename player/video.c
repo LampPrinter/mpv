@@ -59,7 +59,7 @@ static const char av_desync_help_text[] =
 "Audio/Video desynchronisation detected! Possible reasons include too slow\n"
 "hardware, temporary CPU spikes, broken drivers, and broken files. Audio\n"
 "position will not match to the video (see A-V status field).\n"
-"Consider trying `--profile=fast` and/or `--hwdec=auto-safe` as they may help.\n"
+"Consider trying `--profile=fast` and/or `--hwdec=auto` as they may help.\n"
 "\n";
 
 static bool recreate_video_filters(struct MPContext *mpctx)
@@ -284,7 +284,7 @@ void reinit_video_chain_src(struct MPContext *mpctx, struct track *track)
     vo_set_paused(vo_c->vo, get_internal_paused(mpctx));
 
     reset_video_state(mpctx);
-    term_osd_set_subs(mpctx, NULL);
+    term_osd_clear_subs(mpctx);
 
     return;
 
@@ -1294,8 +1294,10 @@ void write_video(struct MPContext *mpctx)
     if (mpctx->video_status != STATUS_EOF) {
         if (mpctx->step_frames > 0) {
             mpctx->step_frames--;
-            if (!mpctx->step_frames)
+            if (!mpctx->step_frames) {
                 set_pause_state(mpctx, true);
+                step_frame_mute(mpctx, false);
+            }
         }
         if (mpctx->max_frames == 0 && !mpctx->stop_play)
             mpctx->stop_play = AT_END_OF_FILE;

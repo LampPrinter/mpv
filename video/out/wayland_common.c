@@ -32,6 +32,7 @@
 #include "osdep/poll_wrapper.h"
 #include "osdep/timer.h"
 #include "present_sync.h"
+#include "video/out/gpu/video.h"
 #include "wayland_common.h"
 #include "win_state.h"
 
@@ -40,6 +41,7 @@
 #include "text-input-unstable-v3.h"
 #include "linux-dmabuf-unstable-v1.h"
 #include "presentation-time.h"
+#include "xdg-activation-v1.h"
 #include "xdg-decoration-unstable-v1.h"
 #include "xdg-shell.h"
 #include "viewporter.h"
@@ -47,17 +49,16 @@
 #include "single-pixel-buffer-v1.h"
 #include "fractional-scale-v1.h"
 
-// Vendored protocols
-#include "xx-color-management-v4.h"
-
-#if HAVE_DRM
-#include <drm_fourcc.h>
-#include <xf86drm.h>
-#include <xf86drmMode.h>
-#endif
-
 #if HAVE_WAYLAND_PROTOCOLS_1_32
 #include "cursor-shape-v1.h"
+#endif
+
+#if HAVE_WAYLAND_PROTOCOLS_1_38
+#include "fifo-v1.h"
+#endif
+
+#if HAVE_WAYLAND_PROTOCOLS_1_41
+#include "color-management-v1.h"
 #endif
 
 #if WAYLAND_VERSION_MAJOR > 1 || WAYLAND_VERSION_MINOR >= 22
@@ -75,9 +76,9 @@
 // From the fractional scale protocol
 #define WAYLAND_SCALE_FACTOR 120.0
 
-// From the xx color management protocol
-#define WAYLAND_COLOR_FACTOR 10000
-
+// From the color management protocol
+#define WAYLAND_COLOR_FACTOR 1000000
+#define WAYLAND_MIN_LUM_FACTOR 10000
 
 enum resizing_constraint {
     MP_WIDTH_CONSTRAINT = 1,
@@ -192,9 +193,11 @@ struct vo_wayland_seat {
     struct wl_pointer  *pointer;
     struct wl_touch    *touch;
     struct wl_data_device *dnd_ddev;
+    struct vo_wayland_data_offer *pending_offer;
+    struct vo_wayland_data_offer *dnd_offer;
+    struct vo_wayland_data_offer *selection_offer;
     struct vo_wayland_text_input *text_input;
-    /* TODO: unvoid this if required wayland protocols is bumped to 1.32+ */
-    void *cursor_shape_device;
+    struct wp_cursor_shape_device_v1 *cursor_shape_device;
     uint32_t pointer_enter_serial;
     uint32_t pointer_button_serial;
     struct xkb_keymap  *xkb_keymap;
@@ -217,8 +220,6 @@ struct vo_wayland_seat {
 struct vo_wayland_tranche {
     struct drm_format *compositor_formats;
     int num_compositor_formats;
-    uint32_t *planar_formats;
-    int num_planar_formats;
     dev_t device_id;
     struct wl_list link;
 };
@@ -252,16 +253,17 @@ static int spawn_cursor(struct vo_wayland_state *wl);
 static void add_feedback(struct vo_wayland_feedback_pool *fback_pool,
                          struct wp_presentation_feedback *fback);
 static void apply_keepaspect(struct vo_wayland_state *wl, int *width, int *height);
-static void get_planar_drm_formats(struct vo_wayland_state *wl);
+static void get_compositor_icc_file(struct vo_wayland_state *wl);
 static void get_shape_device(struct vo_wayland_state *wl, struct vo_wayland_seat *s);
 static void guess_focus(struct vo_wayland_state *wl);
 static void handle_key_input(struct vo_wayland_seat *s, uint32_t key, uint32_t state, bool no_emit);
-static void initialize_color_maps(struct vo_wayland_state *wl);
 static void prepare_resize(struct vo_wayland_state *wl);
 static void remove_feedback(struct vo_wayland_feedback_pool *fback_pool,
                             struct wp_presentation_feedback *fback);
 static void remove_output(struct vo_wayland_output *out);
 static void remove_seat(struct vo_wayland_seat *seat);
+static void seat_create_dnd_ddev(struct vo_wayland_seat *seat);
+static void seat_create_text_input(struct vo_wayland_seat *seat);
 static void request_decoration_mode(struct vo_wayland_state *wl, uint32_t mode);
 static void rescale_geometry(struct vo_wayland_state *wl, double old_scale);
 static void set_geometry(struct vo_wayland_state *wl, bool resize);
@@ -707,7 +709,7 @@ static void data_offer_handle_offer(void *data, struct wl_data_offer *offer,
 {
     struct vo_wayland_seat *s = data;
     struct vo_wayland_state *wl = s->wl;
-    struct vo_wayland_data_offer *o = wl->pending_offer;
+    struct vo_wayland_data_offer *o = s->pending_offer;
     int score = mp_event_get_mime_type_score(wl->vo->input_ctx, mime_type);
     if (o->offer && score > o->mime_score && wl->opts->drag_and_drop != -2) {
         o->mime_score = score;
@@ -726,7 +728,7 @@ static void data_offer_action(void *data, struct wl_data_offer *wl_data_offer, u
 {
     struct vo_wayland_seat *s = data;
     struct vo_wayland_state *wl = s->wl;
-    struct vo_wayland_data_offer *o = wl->dnd_offer;
+    struct vo_wayland_data_offer *o = s->dnd_offer;
     if (dnd_action && wl->opts->drag_and_drop != -2) {
         if (wl->opts->drag_and_drop >= 0) {
             o->action = wl->opts->drag_and_drop;
@@ -755,8 +757,7 @@ static void data_device_handle_data_offer(void *data, struct wl_data_device *wl_
                                           struct wl_data_offer *id)
 {
     struct vo_wayland_seat *s = data;
-    struct vo_wayland_state *wl = s->wl;
-    struct vo_wayland_data_offer *o = wl->pending_offer;
+    struct vo_wayland_data_offer *o = s->pending_offer;
     destroy_offer(o);
 
     o->offer = id;
@@ -770,16 +771,18 @@ static void data_device_handle_enter(void *data, struct wl_data_device *wl_ddev,
 {
     struct vo_wayland_seat *s = data;
     struct vo_wayland_state *wl = s->wl;
-    struct vo_wayland_data_offer *o = wl->pending_offer;
+    struct vo_wayland_data_offer *o = s->pending_offer;
     if (o->offer != id) {
         MP_FATAL(wl, "DND offer ID mismatch!\n");
         return;
     }
 
-    assert(!wl->dnd_offer->offer);
-    *wl->dnd_offer = *wl->pending_offer;
-    *wl->pending_offer = (struct vo_wayland_data_offer){.fd = -1};
-    o = wl->dnd_offer;
+    assert(!s->dnd_offer->offer);
+    int action = s->dnd_offer->action;
+    *s->dnd_offer = *s->pending_offer;
+    *s->pending_offer = (struct vo_wayland_data_offer){.fd = -1};
+    o = s->dnd_offer;
+    o->action = action;
     if (wl->opts->drag_and_drop != -2) {
         wl_data_offer_set_actions(id, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
                                       WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE,
@@ -794,7 +797,7 @@ static void data_device_handle_leave(void *data, struct wl_data_device *wl_ddev)
 {
     struct vo_wayland_seat *s = data;
     struct vo_wayland_state *wl = s->wl;
-    struct vo_wayland_data_offer *o = wl->dnd_offer;
+    struct vo_wayland_data_offer *o = s->dnd_offer;
 
     if (o->offer) {
         if (o->fd != -1)
@@ -815,8 +818,7 @@ static void data_device_handle_motion(void *data, struct wl_data_device *wl_ddev
                                       uint32_t time, wl_fixed_t x, wl_fixed_t y)
 {
     struct vo_wayland_seat *s = data;
-    struct vo_wayland_state *wl = s->wl;
-    struct vo_wayland_data_offer *o = wl->dnd_offer;
+    struct vo_wayland_data_offer *o = s->dnd_offer;
     wl_data_offer_accept(o->offer, time, o->mime_type);
 }
 
@@ -824,7 +826,7 @@ static void data_device_handle_drop(void *data, struct wl_data_device *wl_ddev)
 {
     struct vo_wayland_seat *s = data;
     struct vo_wayland_state *wl = s->wl;
-    struct vo_wayland_data_offer *o = wl->dnd_offer;
+    struct vo_wayland_data_offer *o = s->dnd_offer;
 
     int pipefd[2];
 
@@ -847,18 +849,18 @@ static void data_device_handle_selection(void *data, struct wl_data_device *wl_d
 {
     struct vo_wayland_seat *s = data;
     struct vo_wayland_state *wl = s->wl;
-    struct vo_wayland_data_offer *o = wl->pending_offer;
+    struct vo_wayland_data_offer *o = s->pending_offer;
     if (o->offer != id) {
         MP_FATAL(wl, "Selection offer ID mismatch!\n");
         return;
     }
 
-    if (wl->selection_offer->offer) {
-        destroy_offer(wl->selection_offer);
+    if (s->selection_offer->offer) {
+        destroy_offer(s->selection_offer);
         MP_VERBOSE(wl, "Received a new selection offer. Releasing the previous offer.\n");
     }
-    *wl->selection_offer = *wl->pending_offer;
-    *wl->pending_offer = (struct vo_wayland_data_offer){.fd = -1};
+    *s->selection_offer = *s->pending_offer;
+    *s->pending_offer = (struct vo_wayland_data_offer){.fd = -1};
     if (!id)
         return;
 
@@ -869,7 +871,7 @@ static void data_device_handle_selection(void *data, struct wl_data_device *wl_d
         return;
     }
 
-    o = wl->selection_offer;
+    o = s->selection_offer;
     // Only receive plain text for now, may expand later.
     if (o->offered_plain_text)
         wl_data_offer_receive(o->offer, "text/plain;charset=utf-8", pipefd[1]);
@@ -1391,138 +1393,248 @@ static const struct wp_fractional_scale_v1_listener fractional_scale_listener = 
     preferred_scale,
 };
 
-static void supported_intent(void *data, struct xx_color_manager_v4 *color_manager,
+#if HAVE_WAYLAND_PROTOCOLS_1_41
+static void supported_intent(void *data, struct wp_color_manager_v1 *color_manager,
                              uint32_t render_intent)
 {
 }
 
-static void supported_feature(void *data, struct xx_color_manager_v4 *color_manager,
+static void supported_feature(void *data, struct wp_color_manager_v1 *color_manager,
                               uint32_t feature)
 {
     struct vo_wayland_state *wl = data;
 
     switch (feature) {
-    case XX_COLOR_MANAGER_V4_FEATURE_ICC_V2_V4:
+    case WP_COLOR_MANAGER_V1_FEATURE_ICC_V2_V4:
         MP_VERBOSE(wl, "Compositor supports ICC creator requests.\n");
-        wl->supports_icc = true; // TODO: actually implement
+        wl->supports_icc = true;
         break;
-    case XX_COLOR_MANAGER_V4_FEATURE_PARAMETRIC:
+    case WP_COLOR_MANAGER_V1_FEATURE_PARAMETRIC:
         MP_VERBOSE(wl, "Compositor supports parametric image description creator.\n");
         wl->supports_parametric = true;
         break;
-    case XX_COLOR_MANAGER_V4_FEATURE_SET_PRIMARIES:
+    case WP_COLOR_MANAGER_V1_FEATURE_SET_PRIMARIES:
         MP_VERBOSE(wl, "Compositor supports setting primaries.\n");
         wl->supports_primaries = true;
         break;
-    case XX_COLOR_MANAGER_V4_FEATURE_SET_TF_POWER:
+    case WP_COLOR_MANAGER_V1_FEATURE_SET_TF_POWER:
         MP_VERBOSE(wl, "Compositor supports setting transfer functions.\n");
         wl->supports_tf_power = true;
         break;
-    case XX_COLOR_MANAGER_V4_FEATURE_SET_LUMINANCES:
+    case WP_COLOR_MANAGER_V1_FEATURE_SET_LUMINANCES:
         MP_VERBOSE(wl, "Compositor supports setting luminances.\n");
         wl->supports_luminances = true;
         break;
-    case XX_COLOR_MANAGER_V4_FEATURE_SET_MASTERING_DISPLAY_PRIMARIES:
+    case WP_COLOR_MANAGER_V1_FEATURE_SET_MASTERING_DISPLAY_PRIMARIES:
         MP_VERBOSE(wl, "Compositor supports setting mastering display primaries.\n");
         wl->supports_display_primaries = true;
         break;
     }
 }
 
-static void supported_tf_named(void *data, struct xx_color_manager_v4 *color_manager,
+static void supported_tf_named(void *data, struct wp_color_manager_v1 *color_manager,
                                uint32_t tf)
 {
     struct vo_wayland_state *wl = data;
 
     switch (tf) {
-    case XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_BT709:
-        wl->transfer_map[PL_COLOR_TRC_BT_1886] = XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_BT709;
+    case WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_BT1886:
+        wl->transfer_map[PL_COLOR_TRC_BT_1886] = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_BT1886;
         break;
-    case XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_SRGB:
-        wl->transfer_map[PL_COLOR_TRC_SRGB] = XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_SRGB;
+    case WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_SRGB:
+        wl->transfer_map[PL_COLOR_TRC_SRGB] = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_SRGB;
         break;
-    case XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_LINEAR:
-        wl->transfer_map[PL_COLOR_TRC_LINEAR] = XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_LINEAR;
+    case WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_LINEAR:
+        wl->transfer_map[PL_COLOR_TRC_LINEAR] = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_LINEAR;
         break;
-    case XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_GAMMA22:
-        wl->transfer_map[PL_COLOR_TRC_GAMMA22] = XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_GAMMA22;
+    case WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22:
+        wl->transfer_map[PL_COLOR_TRC_GAMMA22] = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22;
         break;
-    case XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_GAMMA28:
-        wl->transfer_map[PL_COLOR_TRC_GAMMA28] = XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_GAMMA28;
+    case WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA28:
+        wl->transfer_map[PL_COLOR_TRC_GAMMA28] = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA28;
         break;
-    case XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_ST428:
-        wl->transfer_map[PL_COLOR_TRC_ST428] = XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_ST428;
+    case WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST428:
+        wl->transfer_map[PL_COLOR_TRC_ST428] = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST428;
         break;
-    case XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_ST2084_PQ:
-        wl->transfer_map[PL_COLOR_TRC_PQ] = XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_ST2084_PQ;
+    case WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ:
+        wl->transfer_map[PL_COLOR_TRC_PQ] = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ;
         break;
-    case XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_HLG:
-        wl->transfer_map[PL_COLOR_TRC_HLG] = XX_COLOR_MANAGER_V4_TRANSFER_FUNCTION_HLG;
+    case WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_HLG:
+        wl->transfer_map[PL_COLOR_TRC_HLG] = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_HLG;
         break;
     }
 }
 
-static void supported_primaries_named(void *data, struct xx_color_manager_v4 *color_manager,
+static void supported_primaries_named(void *data, struct wp_color_manager_v1 *color_manager,
                                       uint32_t primaries)
 {
     struct vo_wayland_state *wl = data;
 
     switch (primaries) {
-    case XX_COLOR_MANAGER_V4_PRIMARIES_PAL:
-        wl->primaries_map[PL_COLOR_PRIM_BT_601_525] = XX_COLOR_MANAGER_V4_PRIMARIES_PAL;
+    case WP_COLOR_MANAGER_V1_PRIMARIES_PAL:
+        wl->primaries_map[PL_COLOR_PRIM_BT_601_525] = WP_COLOR_MANAGER_V1_PRIMARIES_PAL;
         break;
-    case XX_COLOR_MANAGER_V4_PRIMARIES_NTSC:
-        wl->primaries_map[PL_COLOR_PRIM_BT_601_625] = XX_COLOR_MANAGER_V4_PRIMARIES_NTSC;
+    case WP_COLOR_MANAGER_V1_PRIMARIES_NTSC:
+        wl->primaries_map[PL_COLOR_PRIM_BT_601_625] = WP_COLOR_MANAGER_V1_PRIMARIES_NTSC;
         break;
-    case XX_COLOR_MANAGER_V4_PRIMARIES_SRGB:
-        wl->primaries_map[PL_COLOR_PRIM_BT_709] = XX_COLOR_MANAGER_V4_PRIMARIES_SRGB;
+    case WP_COLOR_MANAGER_V1_PRIMARIES_SRGB:
+        wl->primaries_map[PL_COLOR_PRIM_BT_709] = WP_COLOR_MANAGER_V1_PRIMARIES_SRGB;
         break;
-    case XX_COLOR_MANAGER_V4_PRIMARIES_PAL_M:
-        wl->primaries_map[PL_COLOR_PRIM_BT_470M] = XX_COLOR_MANAGER_V4_PRIMARIES_PAL_M;
+    case WP_COLOR_MANAGER_V1_PRIMARIES_PAL_M:
+        wl->primaries_map[PL_COLOR_PRIM_BT_470M] = WP_COLOR_MANAGER_V1_PRIMARIES_PAL_M;
         break;
-    case XX_COLOR_MANAGER_V4_PRIMARIES_BT2020:
-        wl->primaries_map[PL_COLOR_PRIM_BT_2020] = XX_COLOR_MANAGER_V4_PRIMARIES_BT2020;
+    case WP_COLOR_MANAGER_V1_PRIMARIES_BT2020:
+        wl->primaries_map[PL_COLOR_PRIM_BT_2020] = WP_COLOR_MANAGER_V1_PRIMARIES_BT2020;
         break;
-    case XX_COLOR_MANAGER_V4_PRIMARIES_ADOBE_RGB:
-        wl->primaries_map[PL_COLOR_PRIM_ADOBE] = XX_COLOR_MANAGER_V4_PRIMARIES_ADOBE_RGB;
+    case WP_COLOR_MANAGER_V1_PRIMARIES_ADOBE_RGB:
+        wl->primaries_map[PL_COLOR_PRIM_ADOBE] = WP_COLOR_MANAGER_V1_PRIMARIES_ADOBE_RGB;
         break;
-    case XX_COLOR_MANAGER_V4_PRIMARIES_DCI_P3:
-        wl->primaries_map[PL_COLOR_PRIM_DCI_P3] = XX_COLOR_MANAGER_V4_PRIMARIES_DCI_P3;
+    case WP_COLOR_MANAGER_V1_PRIMARIES_DCI_P3:
+        wl->primaries_map[PL_COLOR_PRIM_DCI_P3] = WP_COLOR_MANAGER_V1_PRIMARIES_DCI_P3;
         break;
-    case XX_COLOR_MANAGER_V4_PRIMARIES_DISPLAY_P3:
-        wl->primaries_map[PL_COLOR_PRIM_DISPLAY_P3] = XX_COLOR_MANAGER_V4_PRIMARIES_DISPLAY_P3;
+    case WP_COLOR_MANAGER_V1_PRIMARIES_DISPLAY_P3:
+        wl->primaries_map[PL_COLOR_PRIM_DISPLAY_P3] = WP_COLOR_MANAGER_V1_PRIMARIES_DISPLAY_P3;
         break;
-    case XX_COLOR_MANAGER_V4_PRIMARIES_GENERIC_FILM:
-        wl->primaries_map[PL_COLOR_PRIM_FILM_C] = XX_COLOR_MANAGER_V4_PRIMARIES_GENERIC_FILM;
+    case WP_COLOR_MANAGER_V1_PRIMARIES_GENERIC_FILM:
+        wl->primaries_map[PL_COLOR_PRIM_FILM_C] = WP_COLOR_MANAGER_V1_PRIMARIES_GENERIC_FILM;
         break;
     }
 }
 
-static const struct xx_color_manager_v4_listener color_manager_listener = {
+static void color_manager_done(void *data, struct wp_color_manager_v1 *color_manager)
+{
+}
+
+static const struct wp_color_manager_v1_listener color_manager_listener = {
     supported_intent,
     supported_feature,
     supported_tf_named,
     supported_primaries_named,
+    color_manager_done,
 };
 
-static void image_description_failed(void *data, struct xx_image_description_v4 *image_description,
+static void image_description_failed(void *data, struct wp_image_description_v1 *image_description,
                                      uint32_t cause, const char *msg)
 {
     struct vo_wayland_state *wl = data;
     MP_VERBOSE(wl, "Image description failed: %d, %s\n", cause, msg);
+    wp_image_description_v1_destroy(image_description);
 }
 
-static void image_description_ready(void *data, struct xx_image_description_v4 *image_description,
+static void image_description_ready(void *data, struct wp_image_description_v1 *image_description,
                                     uint32_t identity)
 {
     struct vo_wayland_state *wl = data;
-    xx_color_management_surface_v4_set_image_description(wl->color_surface, wl->image_description, 0);
+    wp_color_management_surface_v1_set_image_description(wl->color_surface, image_description, 0);
+    MP_VERBOSE(wl, "Image description set on color surface.\n");
+    wp_image_description_v1_destroy(image_description);
 }
 
-static const struct xx_image_description_v4_listener image_description_listener = {
+static const struct wp_image_description_v1_listener image_description_listener = {
     image_description_failed,
     image_description_ready,
 };
+
+static void info_done(void *data, struct wp_image_description_info_v1 *image_description_info)
+{
+    struct vo_wayland_state *wl = data;
+    wp_image_description_info_v1_destroy(image_description_info);
+    if (!wl->icc_file)
+        MP_VERBOSE(wl, "No ICC profile retrieved from the compositor.\n");
+}
+
+static void info_icc_file(void *data, struct wp_image_description_info_v1 *image_description_info,
+                          int32_t icc, uint32_t icc_size)
+{
+    struct vo_wayland_state *wl = data;
+    if (wl->icc_size) {
+        munmap(wl->icc_file, wl->icc_size);
+        wl->icc_file = NULL;
+        wl->icc_size = 0;
+    }
+
+    void *icc_file = mmap(NULL, icc_size, PROT_READ, MAP_PRIVATE, icc, 0);
+    close(icc);
+
+    if (icc_file != MAP_FAILED) {
+        wl->icc_file = icc_file;
+        wl->icc_size = icc_size;
+    }
+    wl->pending_vo_events |= VO_EVENT_ICC_PROFILE_CHANGED;
+}
+
+static void info_primaries(void *data, struct wp_image_description_info_v1 *image_description_info,
+                           int32_t r_x, int32_t r_y, int32_t g_x, int32_t g_y, int32_t b_x, int32_t b_y,
+                           int32_t w_x, int32_t w_y)
+{
+}
+
+static void info_primaries_named(void *data, struct wp_image_description_info_v1 *image_description_info,
+                                 uint32_t primaries)
+{
+}
+
+static void info_tf_power(void *data, struct wp_image_description_info_v1 *image_description_info,
+                          uint32_t eexp)
+{
+}
+
+static void info_tf_named(void *data, struct wp_image_description_info_v1 *image_description_info,
+                          uint32_t tf)
+{
+}
+
+static void info_luminances(void *data, struct wp_image_description_info_v1 *image_description_info,
+                            uint32_t min_lum, uint32_t max_lum, uint32_t reference_lum)
+{
+}
+
+static void info_target_primaries(void *data, struct wp_image_description_info_v1 *image_description_info,
+                                  int32_t r_x, int32_t r_y, int32_t g_x, int32_t g_y, int32_t b_x, int32_t b_y,
+                                  int32_t w_x, int32_t w_y)
+{
+}
+
+static void info_target_luminance(void *data, struct wp_image_description_info_v1 *image_description_info,
+                                  uint32_t min_lum, uint32_t max_lum)
+{
+}
+
+static void info_target_max_cll(void *data, struct wp_image_description_info_v1 *image_description_info,
+                                uint32_t max_cll)
+{
+}
+
+static void info_target_max_fall(void *data, struct wp_image_description_info_v1 *image_description_info,
+                                 uint32_t max_fall)
+{
+}
+
+static const struct wp_image_description_info_v1_listener image_description_info_listener = {
+    info_done,
+    info_icc_file,
+    info_primaries,
+    info_primaries_named,
+    info_tf_power,
+    info_tf_named,
+    info_luminances,
+    info_target_primaries,
+    info_target_luminance,
+    info_target_max_cll,
+    info_target_max_fall,
+};
+
+static void preferred_changed(void *data, struct wp_color_management_surface_feedback_v1 *color_surface_feedback,
+                              uint32_t identity)
+{
+    struct vo_wayland_state *wl = data;
+    get_compositor_icc_file(wl);
+}
+
+static const struct wp_color_management_surface_feedback_v1_listener surface_feedback_listener = {
+    preferred_changed,
+};
+#endif
 
 static const char *zxdg_decoration_mode_to_str(const uint32_t mode)
 {
@@ -1716,7 +1828,6 @@ static void tranche_target_device(void *data,
     static_assert(sizeof(tranche->device_id) == sizeof(dev_t), "");
 
     wl->current_tranche = tranche;
-    get_planar_drm_formats(wl);
     wl_list_insert(&wl->tranche_list, &tranche->link);
 }
 
@@ -1843,9 +1954,19 @@ static void registry_handle_add(void *data, struct wl_registry *reg, uint32_t id
         struct vo_wayland_seat *seat = talloc_zero(wl, struct vo_wayland_seat);
         seat->wl   = wl;
         seat->id   = id;
+        seat->pending_offer = talloc_zero(seat, struct vo_wayland_data_offer);
+        seat->dnd_offer = talloc_zero(seat, struct vo_wayland_data_offer);
+        seat->selection_offer = talloc_zero(seat, struct vo_wayland_data_offer);
+        seat->pending_offer->fd = seat->dnd_offer->fd = seat->selection_offer->fd = -1;
         seat->seat = wl_registry_bind(reg, id, &wl_seat_interface, ver);
         wl_seat_add_listener(seat->seat, &seat_listener, seat);
         wl_list_insert(&wl->seat_list, &seat->link);
+
+        if (wl->devman)
+            seat_create_dnd_ddev(seat);
+
+        if (wl->text_input_manager)
+            seat_create_text_input(seat);
     }
 
     if (!strcmp(interface, wl_shm_interface.name) && found++) {
@@ -1863,6 +1984,13 @@ static void registry_handle_add(void *data, struct wl_registry *reg, uint32_t id
         wl->single_pixel_manager = wl_registry_bind(reg, id, &wp_single_pixel_buffer_manager_v1_interface, ver);
     }
 
+#if HAVE_WAYLAND_PROTOCOLS_1_38
+    if (!strcmp(interface, wp_fifo_manager_v1_interface.name) && found++) {
+        ver = 1;
+        wl->has_fifo = true;
+    }
+#endif
+
     if (!strcmp(interface, wp_fractional_scale_manager_v1_interface.name) && found++) {
         ver = 1;
         wl->fractional_scale_manager = wl_registry_bind(reg, id, &wp_fractional_scale_manager_v1_interface, ver);
@@ -1877,6 +2005,7 @@ static void registry_handle_add(void *data, struct wl_registry *reg, uint32_t id
 
     if (!strcmp(interface, wp_presentation_interface.name) && found++) {
         ver = MPMIN(ver, 2);
+        wl->present_v2 = ver == 2;
         wl->presentation = wl_registry_bind(reg, id, &wp_presentation_interface, ver);
         wp_presentation_add_listener(wl->presentation, &presentation_listener, wl);
     }
@@ -1887,11 +2016,17 @@ static void registry_handle_add(void *data, struct wl_registry *reg, uint32_t id
         xdg_wm_base_add_listener(wl->wm_base, &xdg_wm_base_listener, wl);
     }
 
-    if (!strcmp(interface, xx_color_manager_v4_interface.name) && found++) {
+#if HAVE_WAYLAND_PROTOCOLS_1_41
+    if (!strcmp(interface, wp_color_manager_v1_interface.name) && found++) {
         ver = 1;
-        initialize_color_maps(wl);
-        wl->color_manager = wl_registry_bind(reg, id, &xx_color_manager_v4_interface, ver);
-        xx_color_manager_v4_add_listener(wl->color_manager, &color_manager_listener, wl);
+        wl->color_manager = wl_registry_bind(reg, id, &wp_color_manager_v1_interface, ver);
+        wp_color_manager_v1_add_listener(wl->color_manager, &color_manager_listener, wl);
+    }
+#endif
+
+    if (!strcmp(interface, xdg_activation_v1_interface.name) && found++) {
+        ver = 1;
+        wl->xdg_activation = wl_registry_bind(reg, id, &xdg_activation_v1_interface, ver);
     }
 
     if (!strcmp(interface, zxdg_decoration_manager_v1_interface.name) && found++) {
@@ -1994,7 +2129,7 @@ static void check_fd(struct vo_wayland_state *wl, struct vo_wayland_data_offer *
     if (o->fd == -1)
         return;
 
-    struct pollfd fdp = { o->fd, POLLIN | POLLHUP, 0 };
+    struct pollfd fdp = { .fd = o->fd, .events = POLLIN };
     if (poll(&fdp, 1, 0) <= 0)
         return;
 
@@ -2025,9 +2160,12 @@ static void check_fd(struct vo_wayland_state *wl, struct vo_wayland_data_offer *
                 if (o->offer)
                     wl_data_offer_finish(o->offer);
 
-                assert(o->action >= 0);
-                mp_event_drop_mime_data(wl->vo->input_ctx, o->mime_type,
-                                        content, o->action);
+                if (o->action >= 0) {
+                    mp_event_drop_mime_data(wl->vo->input_ctx, o->mime_type,
+                                            content, o->action);
+                } else {
+                    MP_WARN(wl, "Data offer did not have a valid action!\n");
+                }
             } else {
                 // Update clipboard text content
                 talloc_free(wl->selection_text.start);
@@ -2084,6 +2222,16 @@ static bool create_input(struct vo_wayland_state *wl)
     return 0;
 }
 
+static void xdg_activate(struct vo_wayland_state *wl)
+{
+    const char *token = getenv("XDG_ACTIVATION_TOKEN");
+    if (token) {
+        MP_VERBOSE(wl, "Activating window with token: '%s'\n", token);
+        xdg_activation_v1_activate(wl->xdg_activation, token, wl->surface);
+        unsetenv("XDG_ACTIVATION_TOKEN");
+    }
+}
+
 static int create_viewports(struct vo_wayland_state *wl)
 {
     wl->viewport = wp_viewporter_get_viewport(wl->viewporter, wl->surface);
@@ -2128,19 +2276,6 @@ static void add_feedback(struct vo_wayland_feedback_pool *fback_pool,
     }
 }
 
-#if HAVE_DRM
-static bool devices_are_equal(dev_t a, dev_t b)
-{
-    bool ret = false;
-    drmDevice *deviceA, *deviceB;
-    if (!drmGetDeviceFromDevId(a, 0, &deviceA) && !drmGetDeviceFromDevId(b, 0, &deviceB))
-        ret = drmDevicesEqual(deviceA, deviceB);
-    drmFreeDevice(&deviceA);
-    drmFreeDevice(&deviceB);
-    return ret;
-}
-#endif
-
 static void do_minimize(struct vo_wayland_state *wl)
 {
     if (wl->opts->window_minimized)
@@ -2161,117 +2296,6 @@ static char **get_displays_spanned(struct vo_wayland_state *wl)
     }
     MP_TARRAY_APPEND(NULL, names, displays_spanned, NULL);
     return names;
-}
-
-static void get_planar_drm_formats(struct vo_wayland_state *wl)
-{
-#if HAVE_DRM
-    struct vo_wayland_tranche *tranche;
-    wl_list_for_each(tranche, &wl->tranche_list, link) {
-        // If there is a device equality, just copy the pointer over.
-        if (devices_are_equal(tranche->device_id, wl->current_tranche->device_id)) {
-            wl->current_tranche->planar_formats = tranche->planar_formats;
-            wl->current_tranche->num_planar_formats = tranche->num_planar_formats;
-            return;
-        }
-    }
-
-    tranche = wl->current_tranche;
-    drmDevice *device = NULL;
-    drmModePlaneRes *res = NULL;
-    drmModePlane *plane = NULL;
-
-    if (drmGetDeviceFromDevId(tranche->device_id, 0, &device) != 0) {
-        MP_VERBOSE(wl, "Unable to get drm device from device id: %s\n", mp_strerror(errno));
-        goto done;
-    }
-
-    // Pick the first path we get and hope for the best.
-    char *path = NULL;
-    for (int i = 0; i < device->available_nodes; ++i) {
-        if (device->nodes[0]) {
-            path = device->nodes[0];
-            break;
-        }
-    }
-
-    if (!path || !path[0]) {
-        MP_VERBOSE(wl, "Unable to find a valid drm device node.\n");
-        goto done;
-    }
-
-    int fd = open(path, O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-        MP_VERBOSE(wl, "Unable to open DRM node path '%s': %s\n", path, mp_strerror(errno));
-        goto done;
-    }
-
-    // Need to set this in order to access plane information.
-    if (drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1)) {
-        MP_VERBOSE(wl, "Unable to set DRM atomic cap: %s\n", mp_strerror(errno));
-        goto done;
-    }
-
-    res = drmModeGetPlaneResources(fd);
-    if (!res) {
-        MP_VERBOSE(wl, "Unable to get DRM plane resources: %s\n", mp_strerror(errno));
-        goto done;
-    }
-
-    if (!res->count_planes) {
-        MP_VERBOSE(wl, "No DRM planes were found.\n");
-        goto done;
-    }
-
-    // Only check the formats on the first primary plane we find as a crude guess.
-    int index = -1;
-    for (int i = 0; i < res->count_planes; ++i) {
-        drmModeObjectProperties *props = NULL;
-        props = drmModeObjectGetProperties(fd, res->planes[i], DRM_MODE_OBJECT_PLANE);
-        if (!props) {
-            MP_VERBOSE(wl, "Unable to get DRM plane properties: %s\n", mp_strerror(errno));
-            continue;
-        }
-        for (int j = 0; j < props->count_props; ++j) {
-            drmModePropertyRes *prop = drmModeGetProperty(fd, props->props[j]);
-            if (!prop) {
-                MP_VERBOSE(wl, "Unable to get DRM plane property: %s\n", mp_strerror(errno));
-                continue;
-            }
-            if (strcmp(prop->name, "type") == 0) {
-                for (int k = 0; k < prop->count_values; ++k) {
-                    if (prop->values[k] == DRM_PLANE_TYPE_PRIMARY)
-                        index = i;
-                }
-            }
-            drmModeFreeProperty(prop);
-            if (index > -1)
-                break;
-        }
-        drmModeFreeObjectProperties(props);
-        if (index > -1)
-            break;
-    }
-
-    if (index == -1) {
-        MP_VERBOSE(wl, "Unable to get DRM plane: %s\n", mp_strerror(errno));
-        goto done;
-    }
-
-    plane = drmModeGetPlane(fd, res->planes[index]);
-    tranche->num_planar_formats = plane->count_formats;
-    tranche->planar_formats = talloc_zero_array(tranche, int, tranche->num_planar_formats);
-
-    for (int i = 0; i < tranche->num_planar_formats; ++i) {
-        MP_DBG(wl, "DRM primary plane supports drm format: %s\n", mp_tag_str(plane->formats[i]));
-        tranche->planar_formats[i] = plane->formats[i];
-    }
-
-done:
-    drmModeFreePlane(plane);
-    drmModeFreePlaneResources(res);
-    drmFreeDevice(&device);
-#endif
 }
 
 static int get_mods(struct vo_wayland_seat *s)
@@ -2300,6 +2324,18 @@ static int get_mods(struct vo_wayland_seat *s)
             modifiers |= mods[n];
     }
     return modifiers;
+}
+
+static void get_compositor_icc_file(struct vo_wayland_state *wl)
+{
+#if HAVE_WAYLAND_PROTOCOLS_1_41
+    struct wp_image_description_v1 *image_description =
+        wp_color_management_surface_feedback_v1_get_preferred(wl->color_surface_feedback);
+    struct wp_image_description_info_v1 *description_info =
+        wp_image_description_v1_get_information(image_description);
+    wp_image_description_info_v1_add_listener(description_info, &image_description_info_listener, wl);
+    wp_image_description_v1_destroy(image_description);
+#endif
 }
 
 static void get_shape_device(struct vo_wayland_state *wl, struct vo_wayland_seat *s)
@@ -2448,15 +2484,6 @@ static int handle_round(int scale, int n)
     return (scale * n + WAYLAND_SCALE_FACTOR / 2) / WAYLAND_SCALE_FACTOR;
 }
 
-static void initialize_color_maps(struct vo_wayland_state *wl)
-{
-    // -1 indicates unsupported
-    for (int i = 0; i < PL_COLOR_PRIM_COUNT; i++)
-        wl->primaries_map[i] = -1;
-    for (int i = 0; i < PL_COLOR_TRC_COUNT; i++)
-        wl->transfer_map[i] = -1;
-}
-
 static void prepare_resize(struct vo_wayland_state *wl)
 {
     int32_t width = mp_rect_w(wl->geometry) / wl->scaling_factor;
@@ -2548,78 +2575,72 @@ static void remove_seat(struct vo_wayland_seat *seat)
     if (seat->xkb_state)
         xkb_state_unref(seat->xkb_state);
 
+    destroy_offer(seat->pending_offer);
+    destroy_offer(seat->dnd_offer);
+    destroy_offer(seat->selection_offer);
+
     wl_seat_destroy(seat->seat);
     talloc_free(seat);
     return;
 }
 
-static void reset_color_management(struct vo_wayland_state *wl)
+static void seat_create_dnd_ddev(struct vo_wayland_seat *seat)
 {
-    if (!wl->color_surface)
-        return;
-
-    if (wl->image_creator_params)
-        xx_image_description_creator_params_v4_destroy(wl->image_creator_params);
-
-    if (wl->image_description) {
-        xx_color_management_surface_v4_unset_image_description(wl->color_surface);
-        xx_image_description_v4_destroy(wl->image_description);
-        wl->image_description = NULL;
-    }
-
-    wl->image_creator_params = xx_color_manager_v4_new_parametric_creator(wl->color_manager);
-    wl->unsupported_colorspace = false;
+    seat->dnd_ddev = wl_data_device_manager_get_data_device(seat->wl->devman, seat->seat);
+    wl_data_device_add_listener(seat->dnd_ddev, &data_device_listener, seat);
 }
 
-static int set_colorspace(struct vo_wayland_state *wl)
+static void seat_create_text_input(struct vo_wayland_seat *seat)
 {
-    struct pl_color_space color = wl->target_params.color;
-    int xx_primaries = wl->primaries_map[color.primaries];
-    int xx_transfer = wl->transfer_map[color.transfer];
-
-    if (xx_primaries == -1)
-        MP_VERBOSE(wl, "Compositor does not support color primary: %s\n", m_opt_choice_str(pl_csp_prim_names, color.primaries));
-
-    if (xx_transfer == -1)
-        MP_VERBOSE(wl, "Compositor does not support transfer function: %s\n", m_opt_choice_str(pl_csp_trc_names, color.transfer));
-
-    if (xx_primaries == -1 || xx_transfer == -1) {
-        wl->unsupported_colorspace = true;
-        return -1;
-    }
-
-    xx_image_description_creator_params_v4_set_primaries_named(wl->image_creator_params, xx_primaries);
-    xx_image_description_creator_params_v4_set_tf_named(wl->image_creator_params, xx_transfer);
-    return 0;
+    seat->text_input = talloc_zero(seat, struct vo_wayland_text_input);
+    seat->text_input->text_input = zwp_text_input_manager_v3_get_text_input(seat->wl->text_input_manager, seat->seat);
+    zwp_text_input_v3_add_listener(seat->text_input->text_input, &text_input_listener, seat);
 }
 
 static void set_color_management(struct vo_wayland_state *wl)
 {
+#if HAVE_WAYLAND_PROTOCOLS_1_41
     struct mp_image_params target_params = vo_get_target_params(wl->vo);
-    if (!wl->color_surface || wl->unsupported_colorspace || pl_color_space_equal(&target_params.color, &wl->target_params.color))
+    if (!wl->color_surface || pl_color_space_equal(&target_params.color, &wl->target_params.color))
         return;
 
     wl->target_params = target_params;
-    reset_color_management(wl);
-    if (set_colorspace(wl))
+    wp_color_management_surface_v1_unset_image_description(wl->color_surface);
+
+    struct pl_color_space color = wl->target_params.color;
+    int primaries = wl->primaries_map[color.primaries];
+    int transfer = wl->transfer_map[color.transfer];
+    if (!primaries)
+        MP_VERBOSE(wl, "Compositor does not support color primary: %s\n", m_opt_choice_str(pl_csp_prim_names, color.primaries));
+    if (!transfer)
+        MP_VERBOSE(wl, "Compositor does not support transfer function: %s\n", m_opt_choice_str(pl_csp_trc_names, color.transfer));
+    if (!primaries || !transfer)
         return;
+
+    struct wp_image_description_creator_params_v1 *image_creator_params =
+        wp_color_manager_v1_create_parametric_creator(wl->color_manager);
+    wp_image_description_creator_params_v1_set_primaries_named(image_creator_params, primaries);
+    wp_image_description_creator_params_v1_set_tf_named(image_creator_params, transfer);
+
     struct pl_hdr_metadata hdr = wl->target_params.color.hdr;
     if (wl->supports_display_primaries) {
-        xx_image_description_creator_params_v4_set_mastering_display_primaries(wl->image_creator_params,
+        wp_image_description_creator_params_v1_set_mastering_display_primaries(image_creator_params,
                 hdr.prim.red.x * WAYLAND_COLOR_FACTOR, hdr.prim.red.y * WAYLAND_COLOR_FACTOR, hdr.prim.green.x * WAYLAND_COLOR_FACTOR,
                 hdr.prim.green.y * WAYLAND_COLOR_FACTOR, hdr.prim.blue.x * WAYLAND_COLOR_FACTOR, hdr.prim.blue.y * WAYLAND_COLOR_FACTOR,
                 hdr.prim.white.x * WAYLAND_COLOR_FACTOR, hdr.prim.white.y * WAYLAND_COLOR_FACTOR);
 
-        // No clear enum in the protocol to indicate if these are supposed
-        // to work or not so just hope they do if setting display
-        // primaries is supported.
-        xx_image_description_creator_params_v4_set_mastering_luminance(wl->image_creator_params, hdr.min_luma * WAYLAND_COLOR_FACTOR, hdr.max_luma);
-        xx_image_description_creator_params_v4_set_max_cll(wl->image_creator_params, hdr.max_cll);
-        xx_image_description_creator_params_v4_set_max_fall(wl->image_creator_params, hdr.max_fall);
+        if (hdr.min_luma < hdr.max_luma)
+            wp_image_description_creator_params_v1_set_mastering_luminance(image_creator_params, hdr.min_luma * WAYLAND_MIN_LUM_FACTOR, hdr.max_luma);
+
+        if (hdr.max_cll > hdr.min_luma && hdr.max_cll <= hdr.max_luma)
+            wp_image_description_creator_params_v1_set_max_cll(image_creator_params, hdr.max_cll);
+
+        if (hdr.max_fall > hdr.min_luma && hdr.max_fall <= hdr.max_luma && hdr.max_fall <= hdr.max_cll)
+            wp_image_description_creator_params_v1_set_max_fall(image_creator_params, hdr.max_fall);
     }
-    wl->image_description = xx_image_description_creator_params_v4_create(wl->image_creator_params);
-    wl->image_creator_params = NULL;
-    xx_image_description_v4_add_listener(wl->image_description, &image_description_listener, wl);
+    struct wp_image_description_v1 *image_description = wp_image_description_creator_params_v1_create(image_creator_params);
+    wp_image_description_v1_add_listener(image_description, &image_description_listener, wl);
+#endif
 }
 
 static void set_content_type(struct vo_wayland_state *wl)
@@ -3015,8 +3036,11 @@ int vo_wayland_control(struct vo *vo, int *events, int request, void *arg)
 
     switch (request) {
     case VOCTRL_CHECK_EVENTS: {
-        check_fd(wl, wl->dnd_offer, true);
-        check_fd(wl, wl->selection_offer, false);
+        struct vo_wayland_seat *seat;
+        wl_list_for_each(seat, &wl->seat_list, link) {
+            check_fd(wl, seat->dnd_offer, true);
+            check_fd(wl, seat->selection_offer, false);
+        }
         *events |= wl->pending_vo_events;
         if (*events & VO_EVENT_RESIZE) {
             *events |= VO_EVENT_EXPOSE;
@@ -3084,6 +3108,15 @@ int vo_wayland_control(struct vo *vo, int *events, int request, void *arg)
     }
     case VOCTRL_GET_DISPLAY_NAMES: {
         *(char ***)arg = get_displays_spanned(wl);
+        return VO_TRUE;
+    }
+    case VOCTRL_GET_ICC_PROFILE: {
+        if (!wl->supports_icc)
+            MP_WARN(wl, "Compositor does not support ICC profiles!\n");
+        if (!wl->icc_file)
+            return VO_FALSE;
+        MP_VERBOSE(wl, "Retrieving ICC profile from compositor.\n");
+        *(bstr *)arg = bstrdup(NULL, (bstr){wl->icc_file, wl->icc_size});
         return VO_TRUE;
     }
     case VOCTRL_GET_UNFS_WINDOW_SIZE: {
@@ -3177,7 +3210,6 @@ void vo_wayland_handle_color(struct vo_wayland_state *wl)
 {
     if (!wl->vo->target_params)
         return;
-
     set_color_management(wl);
 }
 
@@ -3190,30 +3222,17 @@ void vo_wayland_handle_scale(struct vo_wayland_state *wl)
 
 bool vo_wayland_valid_format(struct vo_wayland_state *wl, uint32_t drm_format, uint64_t modifier)
 {
-#if HAVE_DRM
     // Tranches are grouped by preference and the first tranche is at the end of
     // the list. It doesn't really matter for us since we search everything
     // anyways, but might as well start from the most preferred tranche.
     struct vo_wayland_tranche *tranche;
     wl_list_for_each_reverse(tranche, &wl->tranche_list, link) {
-        bool supported_compositor_format = false;
         struct drm_format *formats = tranche->compositor_formats;
         for (int i = 0; i < tranche->num_compositor_formats; ++i) {
-            if (formats[i].format != drm_format)
-                continue;
-            if (modifier == formats[i].modifier && modifier != DRM_FORMAT_MOD_INVALID)
+            if (drm_format == formats[i].format && modifier == formats[i].modifier)
                 return true;
-            supported_compositor_format = true;
-        }
-
-        if (supported_compositor_format && tranche->planar_formats) {
-            for (int i = 0; i < tranche->num_planar_formats; i++) {
-                if (drm_format == tranche->planar_formats[i])
-                    return true;
-            }
         }
     }
-#endif
     return false;
 }
 
@@ -3235,13 +3254,9 @@ bool vo_wayland_init(struct vo *vo)
         .scaling = WAYLAND_SCALE_FACTOR,
         .wakeup_pipe = {-1, -1},
         .display_fd = -1,
-        .pending_offer = talloc_zero(wl, struct vo_wayland_data_offer),
-        .dnd_offer = talloc_zero(wl, struct vo_wayland_data_offer),
-        .selection_offer = talloc_zero(wl, struct vo_wayland_data_offer),
         .cursor_visible = true,
         .opts_cache = m_config_cache_alloc(wl, vo->global, &vo_sub_opts),
     };
-    wl->pending_offer->fd = wl->dnd_offer->fd = wl->selection_offer->fd = -1;
     wl->opts = wl->opts_cache->opts;
 
     wl_list_init(&wl->output_list);
@@ -3291,15 +3306,24 @@ bool vo_wayland_init(struct vo *vo)
     if (create_xdg_surface(wl))
         goto err;
 
+    if (wl->xdg_activation) {
+        xdg_activate(wl);
+    } else {
+        MP_VERBOSE(wl, "Compositor doesn't support the %s protocol!\n",
+            xdg_activation_v1_interface.name);
+    }
+
     if (wl->subcompositor) {
         wl->osd_subsurface = wl_subcompositor_get_subsurface(wl->subcompositor, wl->osd_surface, wl->video_surface);
         wl->video_subsurface = wl_subcompositor_get_subsurface(wl->subcompositor, wl->video_surface, wl->surface);
     }
 
+#if HAVE_WAYLAND_PROTOCOLS_1_41
     if (!wl->color_manager) {
         MP_VERBOSE(wl, "Compositor doesn't support the %s protocol!\n",
-                   xx_color_manager_v4_interface.name);
+                   wp_color_manager_v1_interface.name);
     }
+#endif
 
     if (wl->content_type_manager) {
         wl->content_type = wp_content_type_manager_v1_get_surface_content_type(wl->content_type_manager, wl->surface);
@@ -3331,8 +3355,8 @@ bool vo_wayland_init(struct vo *vo)
     if (wl->devman) {
         struct vo_wayland_seat *seat;
         wl_list_for_each(seat, &wl->seat_list, link) {
-            seat->dnd_ddev = wl_data_device_manager_get_data_device(wl->devman, seat->seat);
-            wl_data_device_add_listener(seat->dnd_ddev, &data_device_listener, seat);
+            if (!seat->dnd_ddev)
+                seat_create_dnd_ddev(seat);
         }
     } else {
         MP_VERBOSE(wl, "Compositor doesn't support the %s (ver. 3) protocol!\n",
@@ -3374,9 +3398,8 @@ bool vo_wayland_init(struct vo *vo)
     if (wl->text_input_manager) {
         struct vo_wayland_seat *seat;
         wl_list_for_each(seat, &wl->seat_list, link) {
-            seat->text_input = talloc_zero(seat, struct vo_wayland_text_input);
-            seat->text_input->text_input = zwp_text_input_manager_v3_get_text_input(wl->text_input_manager, seat->seat);
-            zwp_text_input_v3_add_listener(seat->text_input->text_input, &text_input_listener, seat);
+            if (!seat->text_input)
+                seat_create_text_input(seat);
         }
     } else {
         MP_VERBOSE(wl, "Compositor doesn't support the %s protocol!\n",
@@ -3396,12 +3419,29 @@ bool vo_wayland_init(struct vo *vo)
      * before mpv does anything else. */
     wl_display_roundtrip(wl->display);
 
-    // Only bind to vo_dmabuf_wayland for now to avoid conflicting with VK_hdr_layer
-    if (wl->color_manager && wl->supports_parametric && !strcmp(wl->vo->driver->name, "dmabuf-wayland")) {
-        wl->color_surface = xx_color_manager_v4_get_surface(wl->color_manager, wl->callback_surface);
-    } else {
-        MP_VERBOSE(wl, "Compositor does not support parametric image descriptions!\n");
+#if HAVE_WAYLAND_PROTOCOLS_1_41
+    // Only bind color surface to vo_dmabuf_wayland for now to avoid conflicting with graphics drivers
+    if (wl->color_manager && wl->supports_parametric && !strcmp(wl->vo->driver->name, "dmabuf-wayland"))
+        wl->color_surface = wp_color_manager_v1_get_surface(wl->color_manager, wl->callback_surface);
+
+    if (wl->color_manager && wl->supports_icc) {
+        wl->color_surface_feedback = wp_color_manager_v1_get_surface_feedback(wl->color_manager, wl->callback_surface);
+        wp_color_management_surface_feedback_v1_add_listener(wl->color_surface_feedback, &surface_feedback_listener, wl);
     }
+#endif
+
+    if (!wl->supports_parametric)
+        MP_VERBOSE(wl, "Compositor does not support parametric image descriptions!\n");
+
+    struct gl_video_opts *gl_opts = mp_get_config_group(NULL, vo->global, &gl_video_conf);
+    if (wl->supports_icc) {
+        // dumb workaround for avoiding -Wunused-function
+        get_compositor_icc_file(wl);
+    } else {
+        int msg_level = gl_opts->icc_opts->profile_auto ? MSGL_WARN : MSGL_V;
+        mp_msg(wl->log, msg_level, "Compositor does not support ICC profiles!\n");
+    }
+    talloc_free(gl_opts);
 
     return true;
 
@@ -3415,8 +3455,6 @@ bool vo_wayland_reconfig(struct vo *vo)
     struct vo_wayland_state *wl = vo->wl;
 
     MP_VERBOSE(wl, "Reconfiguring!\n");
-
-    reset_color_management(wl);
 
     if (!wl->current_output) {
         wl->current_output = find_output(wl);
@@ -3479,10 +3517,6 @@ void vo_wayland_uninit(struct vo *vo)
     if (!wl)
         return;
 
-    destroy_offer(wl->pending_offer);
-    destroy_offer(wl->dnd_offer);
-    destroy_offer(wl->selection_offer);
-
     mp_input_put_key(wl->vo->input_ctx, MP_INPUT_RELEASE_ALL);
 
     if (wl->compositor)
@@ -3502,17 +3536,16 @@ void vo_wayland_uninit(struct vo *vo)
     if (wl->cursor_theme)
         wl_cursor_theme_destroy(wl->cursor_theme);
 
+#if HAVE_WAYLAND_PROTOCOLS_1_41
     if (wl->color_manager)
-        xx_color_manager_v4_destroy(wl->color_manager);
+        wp_color_manager_v1_destroy(wl->color_manager);
 
     if (wl->color_surface)
-        xx_color_management_surface_v4_destroy(wl->color_surface);
+        wp_color_management_surface_v1_destroy(wl->color_surface);
 
-    if (wl->image_creator_params)
-        xx_image_description_creator_params_v4_destroy(wl->image_creator_params);
-
-    if (wl->image_description)
-        xx_image_description_v4_destroy(wl->image_description);
+    if (wl->color_surface_feedback)
+        wp_color_management_surface_feedback_v1_destroy(wl->color_surface_feedback);
+#endif
 
     if (wl->content_type)
         wp_content_type_v1_destroy(wl->content_type);
@@ -3594,6 +3627,9 @@ void vo_wayland_uninit(struct vo *vo)
 
     if (wl->wm_base)
         xdg_wm_base_destroy(wl->wm_base);
+
+    if (wl->xdg_activation)
+        xdg_activation_v1_destroy(wl->xdg_activation);
 
     if (wl->xdg_decoration_manager)
         zxdg_decoration_manager_v1_destroy(wl->xdg_decoration_manager);

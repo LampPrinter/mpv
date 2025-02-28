@@ -72,6 +72,7 @@ extern const struct m_sub_options demux_lavf_conf;
 extern const struct m_sub_options demux_mkv_conf;
 extern const struct m_sub_options vd_lavc_conf;
 extern const struct m_sub_options ad_lavc_conf;
+extern const struct m_sub_options hwdec_conf;
 extern const struct m_sub_options input_config;
 extern const struct m_sub_options encode_config;
 extern const struct m_sub_options ra_ctx_conf;
@@ -205,7 +206,10 @@ static const m_option_t mp_vo_opt_list[] = {
         {"auto", -1}, {"no", 0}, {"yes", 1})},
     {"wayland-content-type", OPT_CHOICE(wl_content_type, {"auto", -1}, {"none", 0},
         {"photo", 1}, {"video", 2}, {"game", 3})},
-    {"wayland-disable-vsync", OPT_BOOL(wl_disable_vsync)},
+    {"wayland-disable-vsync", OPT_BOOL(wl_disable_vsync),
+        .deprecation_message = "replaced by --wayland-internal-vsync=no"},
+    {"wayland-internal-vsync", OPT_CHOICE(wl_internal_vsync,
+        {"no", 0}, {"auto", 1}, {"yes", 2})},
     {"wayland-edge-pixels-pointer", OPT_INT(wl_edge_pixels_pointer),
         M_RANGE(0, INT_MAX)},
     {"wayland-edge-pixels-touch", OPT_INT(wl_edge_pixels_touch),
@@ -260,7 +264,6 @@ const struct m_sub_options vo_sub_opts = {
         .keepaspect = true,
         .keepaspect_window = true,
         .native_fs = true,
-        .input_ime = true,
         .taskbar_progress = true,
         .show_in_taskbar = true,
         .border = true,
@@ -274,6 +277,7 @@ const struct m_sub_options vo_sub_opts = {
         .wl_content_type = -1,
         .wl_edge_pixels_pointer = 16,
         .wl_edge_pixels_touch = 32,
+        .wl_internal_vsync = 1,
         .wl_present = true,
         .mmcss_profile = "Playback",
         .ontop_level = -1,
@@ -550,6 +554,7 @@ static const m_option_t mp_opts[] = {
         OPT_CHOICE(lua_load_auto_profiles, {"no", 0}, {"yes", 1}, {"auto", -1}),
         .flags = UPDATE_BUILTIN_SCRIPTS},
     {"load-select", OPT_BOOL(lua_load_select), .flags = UPDATE_BUILTIN_SCRIPTS},
+    {"load-positioning", OPT_BOOL(lua_load_positioning), .flags = UPDATE_BUILTIN_SCRIPTS},
 #endif
 
 // ------------------------- stream options --------------------
@@ -627,7 +632,7 @@ static const m_option_t mp_opts[] = {
 #endif
 
     // demuxer.c - select audio/sub file/demuxer
-    {"demuxer", OPT_STRING(demuxer_name), .help = demuxer_help},
+    {"demuxer", OPT_STRING(demuxer_name), .help = demuxer_help, .flags = UPDATE_DEMUXER},
     {"audio-demuxer", OPT_STRING(audio_demuxer_name), .help = demuxer_help},
     {"sub-demuxer", OPT_STRING(sub_demuxer_name), .help = demuxer_help},
     {"demuxer-thread", OPT_BOOL(demuxer_thread)},
@@ -670,6 +675,8 @@ static const m_option_t mp_opts[] = {
     {"", OPT_SUBSTRUCT(dec_wrapper, dec_wrapper_conf)},
     {"", OPT_SUBSTRUCT(vd_lavc_params, vd_lavc_conf)},
     {"ad-lavc", OPT_SUBSTRUCT(ad_lavc_params, ad_lavc_conf)},
+
+    {"", OPT_SUBSTRUCT(hwdec_opts, hwdec_conf)},
 
     {"", OPT_SUBSTRUCT(demux_lavf, demux_lavf_conf)},
     {"demuxer-rawaudio", OPT_SUBSTRUCT(demux_rawaudio, demux_rawaudio_conf)},
@@ -813,6 +820,9 @@ static const m_option_t mp_opts[] = {
     {"watch-later-directory", OPT_ALIAS("watch-later-dir")},
     {"watch-later-options", OPT_STRINGLIST(watch_later_options)},
 
+    {"save-watch-history", OPT_BOOL(save_watch_history)},
+    {"watch-history-path", OPT_STRING(watch_history_path), .flags = M_OPT_FILE},
+
     {"ordered-chapters", OPT_BOOL(ordered_chapters)},
     {"ordered-chapters-files", OPT_STRING(ordered_chapters_files),
         .flags = M_OPT_FILE},
@@ -863,7 +873,9 @@ static const m_option_t mp_opts[] = {
     {"idle", OPT_CHOICE(player_idle_mode,
         {"no",   0}, {"once", 1}, {"yes",  2})},
 
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
     {"input-commands", OPT_STRINGLIST(input_commands)},
+#endif
     {"input-terminal", OPT_BOOL(consolecontrols), .flags = UPDATE_TERM},
 
     {"input-ipc-server", OPT_STRING(ipc_path), .flags = M_OPT_FILE},
@@ -975,6 +987,7 @@ static const struct MPOpts mp_default_opts = {
     .lua_load_console = true,
     .lua_load_auto_profiles = -1,
     .lua_load_select = true,
+    .lua_load_positioning = true,
 #endif
     .auto_load_scripts = true,
     .loop_times = 1,
@@ -988,10 +1001,12 @@ static const struct MPOpts mp_default_opts = {
     .sync_max_factor = 5,
     .load_config = true,
     .position_resume = true,
+    .watch_history_path = "~~state/watch_history.jsonl",
     .autoload_files = true,
     .demuxer_thread = true,
     .demux_termination_timeout = 0.1,
     .hls_bitrate = INT_MAX,
+    .prefetch_open = true,
     .cache_pause = true,
     .cache_pause_wait = 1.0,
     .ab_loop = {MP_NOPTS_VALUE, MP_NOPTS_VALUE},

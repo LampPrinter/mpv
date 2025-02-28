@@ -39,6 +39,7 @@ typedef struct mp_vo_opts {
     int wl_configure_bounds;
     int wl_content_type;
     bool wl_disable_vsync;
+    int wl_internal_vsync;
     int wl_edge_pixels_pointer;
     int wl_edge_pixels_touch;
     bool wl_present;
@@ -173,6 +174,7 @@ typedef struct MPOpts {
     bool lua_load_console;
     int lua_load_auto_profiles;
     bool lua_load_select;
+    bool lua_load_positioning;
 
     bool auto_load_scripts;
 
@@ -277,6 +279,8 @@ typedef struct MPOpts {
     bool ignore_path_in_watch_later_config;
     char *watch_later_dir;
     char **watch_later_options;
+    bool save_watch_history;
+    char *watch_history_path;
     bool pause;
     int keep_open;
     bool keep_open_pause;
@@ -360,6 +364,8 @@ typedef struct MPOpts {
 
     struct vd_lavc_params *vd_lavc_params;
     struct ad_lavc_params *ad_lavc_params;
+
+    struct hwdec_opts *hwdec_opts;
 
     struct input_opts *input_opts;
 

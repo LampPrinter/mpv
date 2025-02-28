@@ -926,9 +926,10 @@ REPL.
 
     ``submit``
         A callback invoked when the user presses Enter. The first argument is
-        the text in the console. You can close the console from within the
-        callback by calling ``input.terminate()``. If you don't, the console
-        stays open and the user can input more text.
+        the text in the console.
+
+    ``keep_open``
+        Whether to keep the console open on submit. Defaults to ``false``.
 
     ``opened``
         A callback invoked when the console is shown. This can be used to
@@ -998,11 +999,7 @@ REPL.
         })
 
 ``input.select(table)``
-    Specify a list of items that are presented to the user for selection. The
-    user can type part of the desired item and/or navigate them with
-    keybindings: ``Down`` and ``Ctrl+n`` go down, ``Up`` and ``Ctrl+p`` go up,
-    ``Page down`` and ``Ctrl+f`` scroll down one page, and ``Page up`` and
-    ``Ctrl+b`` scroll up one page.
+    Specify a list of items that are presented to the user for selection.
 
     The following entries of ``table`` are read:
 
@@ -1017,9 +1014,10 @@ REPL.
 
     ``submit``
         The callback invoked when the user presses Enter. The first argument is
-        the 1-based index of the selected item. Unlike with ``input.get()``, the
-        console is automatically closed on submit without having to call
-        ``input.terminate()``.
+        the 1-based index of the selected item.
+
+    ``keep_open``
+        Whether to keep the console open on submit. Defaults to ``false``.
 
     Example:
 

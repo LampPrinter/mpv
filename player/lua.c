@@ -47,7 +47,7 @@
 #include "core.h"
 #include "command.h"
 #include "client.h"
-#include "libmpv/client.h"
+#include "mpv/client.h"
 
 // List of builtin modules and their contents as strings.
 // All these are generated from player/lua/*.lua
@@ -84,6 +84,9 @@ static const char * const builtin_lua_scripts[][2] = {
     },
     {"@select.lua",
 #   include "player/lua/select.lua.inc"
+    },
+    {"@positioning.lua",
+#   include "player/lua/positioning.lua.inc"
     },
     {0}
 };

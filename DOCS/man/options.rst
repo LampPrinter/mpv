@@ -1067,6 +1067,10 @@ Program Behavior
     Enable the builtin script that lets you select from lists of items (default:
     yes). By default, its keybindings start with the ``g`` key.
 
+``--load-positioning=<yes|no>``
+    Enable the builtin script that provides various keybindings to pan videos
+    and images (default: yes).
+
 ``--player-operation-mode=<cplayer|pseudo-gui>``
     For enabling "pseudo GUI mode", which means that the defaults for some
     options are changed. This option should not normally be used directly, but
@@ -1077,12 +1081,13 @@ Watch Later
 -----------
 
 ``--save-position-on-quit``
-    Always save the current playback position on quit. When this file is
-    played again later, the player will seek to the old playback position on
-    start. This does not happen if playback of a file is stopped in any other
-    way than quitting. For example, going to the next file in the playlist
-    will not save the position, and start playback at beginning the next time
-    the file is played.
+    Always save the current playback position on quit, and also when the
+    ``loadfile`` command is used to replace the current playlist. When this file
+    is played again later, the player will seek to the old playback position on
+    start. This does not happen if playback of a file is stopped in other ways.
+    For example, going to the next file in the playlist will not save the
+    position, and will start playback at beginning the next time the file is
+    played.
 
     This behavior is disabled by default, but is always available when quitting
     the player with Shift+Q.
@@ -1147,6 +1152,26 @@ Watch Later
 ``--ignore-path-in-watch-later-config``
     Ignore path (i.e. use filename only) when using watch later feature.
     (Default: disabled)
+
+Watch History
+-------------
+
+``--save-watch-history``
+    Whether to save which files are played. These can be then selected with the
+    default ``g-h`` key binding.
+
+    .. warning::
+
+        This option may expose privacy-sensitive information and is thus
+        disabled by default.
+
+``--watch-history-path=<path>``
+    The path in which to store the watch history. Default:
+    ``~~state/watch_history.jsonl`` (see `PATHS`_).
+
+    This file contains one JSON object per line. Its ``time`` field is the UNIX
+    timestamp when the file was opened, its ``path`` field is the normalized
+    path, and its ``title`` field is the title when it was available.
 
 Video
 -----
@@ -1255,7 +1280,7 @@ Video
     Set this option only if you have reason to believe the automatically
     determined value is wrong.
 
-``--hwdec=<api1,api2,...|no|auto|auto-safe|auto-copy>``
+``--hwdec=<api1,api2,...|no|auto|auto-copy>``
     Specify the hardware video decoding API that should be used if possible.
     Whether hardware decoding is actually done depends on the video codec. If
     hardware decoding is not possible, mpv will fall back on software decoding.
@@ -1267,26 +1292,28 @@ Video
     to use hardware decoding due to insufficient CPU resources; and even on
     modern systems, sufficiently complex content (eg: 4K60 AV1) may require it.
 
+    This is a string list option. See `List Options`_ for details.
+
     .. note::
 
         Use the ``Ctrl+h`` shortcut to toggle hardware decoding at runtime. It
-        toggles this option between ``auto-safe`` and ``no``.
+        toggles this option between ``auto`` and ``no``.
 
         If you decide you want to use hardware decoding by default, the general
         recommendation is to try out decoding with the command line option, and
         prove to yourself that it works as desired for the content you care
         about. After that, you can add it to your config file.
 
-        When testing, you should start by using ``hwdec=auto-safe`` as it will
+        When testing, you should start by using ``hwdec=auto`` as it will
         limit itself to choosing from hwdecs that are actively supported by the
         development team. If that doesn't result in working hardware decoding,
-        you can try ``hwdec=auto`` to have it attempt to load every possible
-        hwdec, but if ``auto-safe`` didn't work, you will probably need to know
-        exactly which hwdec matches your hardware and read up on that entry
-        below.
+        you can try ``hwdec=auto-unsafe`` to have it attempt to load every
+        possible hwdec, but if ``auto`` didn't work, you will probably need
+        to know exactly which hwdec matches your hardware and read up on that
+        entry below.
 
-        If ``auto-safe`` or ``auto`` produced the desired results, we recommend
-        just sticking with that and only setting a specific hwdec in your config
+        If ``auto`` produced the desired results, we recommend just
+        sticking with that and only setting a specific hwdec in your config
         file if it is really necessary.
 
         If you use the Ubuntu package, keep in mind that their
@@ -1307,8 +1334,8 @@ Video
           distros which force-enable it by default, such as on Ubuntu). Use the
           ``Ctrl+h`` default binding to enable it at runtime.
         - If you're not sure, but want hardware decoding always enabled by
-          default, put ``hwdec=auto-safe`` into your ``mpv.conf``, and
-          acknowledge that this may cause problems.
+          default, put ``hwdec=yes`` into your ``mpv.conf``, and acknowledge that
+          this may cause problems.
         - If you want to test available hardware decoding methods, pass
           ``--hwdec=auto --hwdec-codecs=all`` and look at the terminal output.
         - If you're a developer, or want to perform elaborate tests, you may
@@ -1317,11 +1344,11 @@ Video
     This option accepts a comma delimited list of ``api`` types, along with certain
     special values:
 
-    :no:        always use software decoding (default)
-    :auto-safe: enable any whitelisted hw decoder (see below)
-    :auto:      forcibly enable any hw decoder found (see below)
-    :yes:       exactly the same as ``auto-safe``
-    :auto-copy: enable best hw decoder with copy-back (see below)
+    :no:          always use software decoding (default)
+    :auto:        enable any whitelisted hw decoder (see below)
+    :auto-unsafe: forcibly enable any hw decoder found (see below)
+    :yes:         exactly the same as ``auto``
+    :auto-safe:   exactly the same as ``auto``
 
     .. note::
 
@@ -1363,34 +1390,40 @@ Video
     :crystalhd: copies video back to system RAM (Any platform supported by hardware)
     :rkmpp:     requires ``--vo=gpu`` (some RockChip devices only)
 
-    ``auto`` tries to automatically enable hardware decoding using the first
-    available method. This still depends what VO you are using. See the list
-    above, for which ``--vo`` and ``gpu-context`` is required for a given
-    hwdec. It will go down the list of available hwdecs until one is
-    successfully initialised. If all of them fail, it will fallback to software
-    decoding.
 
-    ``auto-safe`` is similar to ``auto``, but allows only whitelisted methods
-    that are considered "safe". This is supposed to be a reasonable way to
-    enable hardware decdoding by default in a config file (even though you
-    shouldn't do that anyway; prefer runtime enabling with ``Ctrl+h``). Unlike
-    ``auto``, this will not try to enable unknown or known-to-be-bad methods. In
-    addition, this may disable hardware decoding in other situations when it's
-    known to cause problems, but currently this mechanism is quite primitive.
-    (As an example for something that still causes problems: certain
+    ``auto`` tries to automatically enable hardware decoding using the
+    first available method, but allows only whitelisted methods that are
+    considered "safe". This is supposed to be a reasonable way to enable
+    hardware decoding by default in a config file (even though you shouldn't
+    do that anyway; prefer runtime enabling with ``Ctrl+h``). Unlike
+    ``auto-unsafe``, this will not try to enable unknown or known-to-be-bad
+    methods. In addition, this may disable hardware decoding in other situations
+    when it's known to cause problems, but currently this mechanism is quite
+    primitive. (As an example for something that still causes problems: certain
     combinations of HEVC and Intel chips on Windows tend to cause mpv to crash,
     most likely due to driver bugs.)
 
-    ``auto-copy-safe`` selects the union of methods selected with ``auto-safe``
-    and ``auto-copy``.
+    ``auto-unsafe`` is similar to ``auto``, but without the whitelist.
+    In general, you should never need to use this beyond debugging or
+    development use. Any known unsafe hwdec you want to test can simply be
+    appended to the list option such as ``--hwdec=auto,unsafe-hwdec``.
+    This still depends what VO you are using. See the list above, for which
+    ``--vo`` and ``gpu-context`` is required for a given hwdec. It will go down
+    the list of available hwdecs until one is successfully initialised. If all
+    of them fail, it will fallback to software decoding.
 
     ``auto-copy`` selects only modes that copy the video data back to system
-    memory after decoding. This selects modes like ``vaapi-copy`` (and so on).
-    If none of these work, hardware decoding is disabled. This mode is usually
-    guaranteed to incur no additional quality loss compared to software
-    decoding (assuming modern codecs and an error free video stream), and will
-    allow CPU processing with video filters. This mode works with all video
-    filters and VOs.
+    memory after decoding. This selects modes like ``vaapi-copy`` (and so on),
+    but it only allows whitelisted methods that are considered "safe". If none
+    of these work, hardware decoding is disabled. This mode is usually guaranteed
+    to incur no additional quality loss compared to software decoding (assuming
+    modern codecs and an error free video stream), and will allow CPU processing
+    with video filters. This mode works with all video filters and VOs.
+
+    ``auto-copy-safe`` is an alias for ``auto-copy``
+
+    ``auto-copy-unsafe`` is the same as ``auto-copy`` except that it goes through
+    all methods and not just the whitelisted ones that are considered "safe".
 
     Because these copy the decoded video back to system RAM, they're often less
     efficient than the direct modes, and may not help too much over software
@@ -1402,9 +1435,9 @@ Video
        only the ``vaapi``, ``nvdec``, ``cuda`` and ``vulkan`` methods work with
        Vulkan.
 
-    The ``vaapi`` mode, if used with ``--vo=gpu``, requires Mesa 11, and most
-    likely works with Intel and AMD GPUs only. It also requires the opengl EGL
-    backend.
+    The ``vaapi`` mode, if used with ``--vo=gpu`` or ``--vo=gpu-next`` most
+    likely works with Intel and AMD GPUs only. It requires the opengl EGL
+    backend if the GPU does not support drm modifiers.
 
     ``nvdec`` and ``nvdec-copy`` are the newest, and recommended method to do
     hardware decoding on Nvidia GPUs.
@@ -1552,15 +1585,23 @@ Video
 
     This option has no effect if ``--video-unscaled`` option is used.
 
+    The difference between ``--panscan`` and ``--video-zoom`` is that
+    ``--panscan`` can only zoom in until either the video width or height fills
+    the window, while ``--video-zoom`` can zoom in or out arbitrary amounts, and
+    also works with ``--video-unscaled``.
+
 ``--video-aspect-override=<ratio|no>``
     Override video aspect ratio, in case aspect information is incorrect or
     missing in the file being played.
 
     These values have special meaning:
 
+    :no: use the method of the ``--video-aspect-method`` option (default)
     :0:  disable aspect ratio handling, pretend the video has square pixels
-    :no: same as ``0``
-    :-1: use the video stream or container aspect (default)
+         (deprecated, use
+         ``--video-aspect-override=no --video-aspect-method=ignore`` instead)
+    :-1: strictly prefer the container aspect ratio (deprecated, use
+         ``--video-aspect-override=no --video-aspect-method=container`` instead)
 
     But note that handling of these special values might change in the future.
 
@@ -1570,7 +1611,7 @@ Video
         - ``--video-aspect-override=16:9`` or ``--video-aspect-override=1.7777``
         - ``--no-video-aspect-override`` or ``--video-aspect-override=no``
 
-``--video-aspect-method=<bitstream|container>``
+``--video-aspect-method=<bitstream|container|ignore>``
     This sets the default video aspect determination method (if the aspect is
     _not_ overridden by the user with ``--video-aspect-override`` or others).
 
@@ -1581,6 +1622,8 @@ Video
     :bitstream: Strictly prefer the bitstream aspect ratio, unless the bitstream
                 aspect ratio is not set. This is apparently the default behavior
                 with XBMC/kodi, at least with Matroska.
+    :ignore:    Disable aspect ratio handling, pretend the video has square
+                pixels.
 
     The current default for mpv is ``container``.
 
@@ -1806,14 +1849,7 @@ Video
         ``mpv --hwdec=vdpau --hwdec-codecs=h264,mpeg2video``
             Enable vdpau decoding for h264 and mpeg2 only.
 
-``--vd-lavc-check-hw-profile=<yes|no>``
-    Check hardware decoder profile (default: yes). If ``no`` is set, the
-    highest profile of the hardware decoder is unconditionally selected, and
-    decoding is forced even if the profile of the video is higher than that.
-    The result is most likely broken decoding, but may also help if the
-    detected or reported profiles are somehow incorrect.
-
-``--vd-lavc-software-fallback=<yes|no|N>``
+``--hwdec-software-fallback=<yes|no|N>``
     Fallback to software decoding if the hardware-accelerated decoder fails
     (default: 3). If this is a number, then fallback will be triggered if
     N frames fail to decode in a row. 1 is equivalent to ``yes``.
@@ -1822,6 +1858,13 @@ Video
     a fallback happens, parts of the file will be skipped, approximately by to
     the number of packets that could not be decoded. Values below an unspecified
     count will not have this problem, because mpv retains the packets.
+
+``--vd-lavc-check-hw-profile=<yes|no>``
+    Check hardware decoder profile (default: yes). If ``no`` is set, the
+    highest profile of the hardware decoder is unconditionally selected, and
+    decoding is forced even if the profile of the video is higher than that.
+    The result is most likely broken decoding, but may also help if the
+    detected or reported profiles are somehow incorrect.
 
 ``--vd-lavc-film-grain=<auto|cpu|gpu>``
     Enables film grain application on the GPU. If video decoding is done on
@@ -2052,9 +2095,9 @@ Audio
     explicitly selected or rejected by the option.
 
     ``-`` at the end of the list suppresses fallback on other available
-    decoders not on the ``--ad`` list. ``+`` in front of an entry forces the
-    decoder. Both of these should not normally be used, because they break
-    normal decoder auto-selection! Both of these methods are deprecated.
+    decoders not on the ``--ad`` list. This should not normally be used,
+    because they break normal decoder auto-selection! The ``-`` mode is
+    deprecated.
 
     .. admonition:: Examples
 
@@ -2634,7 +2677,7 @@ Subtitles
 
     :none:  Don't forward any video stream information.
     :aspect-ratio: Only forward aspect ratio; fallbacks are used for other properties.
-                   This makes behaviour consistent across different video resolutions.
+                   This makes behavior consistent across different video resolutions.
     :all:   Forward all available information, notably including storage resolution.
 
     For certain kinds of broken ASS files which got repurposed across
@@ -2652,7 +2695,7 @@ Subtitles
 
 ``--sub-ass-video-aspect-override=<no|ratio>``
     Allows passing any arbitrary aspect ratio to libass instead of the video’s
-    actual aspect ratio. Zero or negative aspect ratios are identical to ``no``.
+    actual aspect ratio. Zero aspect ratio is identical to ``no``.
 
     This has no effect if ``sub-ass-use-video-data`` is set to ``none``.
 
@@ -3657,11 +3700,6 @@ Window
     not accept negative values. mpv will create its own window and set the
     wid window as parent, like with X11.
 
-    On macOS/Cocoa, the ID is interpreted as ``NSView*``. Pass it as value cast
-    to ``intptr_t``. mpv will create its own sub-view. Because macOS does not
-    support window embedding of foreign processes, this works only with libmpv,
-    and will crash when used from the command line.
-
     On Android, the ID is interpreted as ``android.view.Surface``. Pass it as a
     value cast to ``intptr_t``. Use with ``--vo=mediacodec_embed`` and
     ``--hwdec=mediacodec`` for direct rendering using MediaCodec, or with
@@ -3732,21 +3770,23 @@ Disc Devices
 ------------
 
 ``--cdda-device=<path>``
-    Specify the CD device for CDDA playback (default: ``/dev/cdrom``).
+    Specify the CD device for CDDA playback. The default device path depends on
+    the OS. See the `OPTICAL DRIVES`_ section.
 
 ``--dvd-device=<path>``
-    Specify the DVD device or .iso filename (default: ``/dev/dvd``). You can
+    Specify the DVD device or .iso filename. You can
     also specify a directory that contains files previously copied directly
-    from a DVD (with e.g. vobcopy).
+    from a DVD (with e.g. vobcopy). The default device path depends on
+    the OS. See the `OPTICAL DRIVES`_ section.
 
     .. admonition:: Example
 
         ``mpv dvd:// --dvd-device=/path/to/dvd/``
 
 ``--bluray-device=<path>``
-    (Blu-ray only)
     Specify the Blu-ray disc location. Must be a directory with Blu-ray
-    structure.
+    structure. The default device path depends on the OS. See the
+    `OPTICAL DRIVES`_ section.
 
     .. admonition:: Example
 
@@ -4166,7 +4206,7 @@ Demuxer
 
 ``--prefetch-playlist=<yes|no>``
     Prefetch next playlist entry while playback of the current entry is ending
-    (default: no).
+    (default: yes).
 
     This does not prefill the cache with the video data of the next URL.
     Prefetching video data is supported only for the current playlist entry,
@@ -4177,15 +4217,9 @@ Demuxer
     This does **not** work with URLs resolved by the ``youtube-dl`` wrapper,
     and it won't.
 
-    This can give subtly wrong results if per-file options are used, or if
-    options are changed in the time window between prefetching start and next
-    file played.
-
     This can occasionally make wrong prefetching decisions. For example, it
     can't predict whether you go backwards in the playlist, and assumes you
     won't edit the playlist.
-
-    Highly experimental.
 
 ``--force-seekable=<yes|no>``
     If the player thinks that the media is not seekable (e.g. playing from a
@@ -4462,14 +4496,23 @@ Input
 
 ``--input-ime=<yes|no>``
     Enable keyboard input via an active input method (IME) connected to the VO.
-    (default: yes). The input popup window, if there is any, is always
+    (default: no). The input popup window, if there is any, is always
     positioned at the top left of the window. Whether pre-edit text is drawn
     depends on the platform. You may need to configure your IME to display the
     pre-edit inside of the input popup window if you cannot read the pre-edit
     text in the mpv window.
 
-    Wayland only. On Windows, the IME is currently always enabled. This option
-    is not applicable to terminal input.
+    Wayland and Windows only. This option is not applicable to terminal input.
+
+    .. note::
+
+        Enabling IME can cause problems with key bindings, because mpv cannot
+        detect any key presses when they go into the IME pre-edit area.
+        It is recommended to enable IME on demand only for the duration
+        while text input is expected.
+
+        The builtin console and input selector enable IME for the duration
+        of accepting text input.
 
 OSD
 ---
@@ -5517,7 +5560,7 @@ DVB
     ``channels.conf``, ``--dvbin-full-transponder`` or the magic PID
     ``8192`` are recommended.
 
-``--dvbin-timeout=<1-30>``
+``--dvbin-timeout=<seconds>``
     Maximum number of seconds to wait when trying to tune a frequency before
     giving up (default: 30).
 
@@ -6037,6 +6080,9 @@ them.
     supported (for example, on Windows 7 without the platform update), mpv will
     automatically fall back to the older bitblt presentation model.
 
+    flip-model needs presentation needs to be disabled for background
+    transparency to work.
+
 ``--d3d11-sync-interval=<0..4>``
     Schedule each frame to be presented for this number of VBlank intervals.
     (default: 1) Setting to 1 will enable VSync, setting to 0 will disable it.
@@ -6113,11 +6159,6 @@ them.
     (default) will automatically switch between telling the compositor the content
     is a photo, video or possibly none depending on internal heuristics.
 
-``--wayland-disable-vsync=<yes|no>``
-    Disable mpv's internal vsync for Wayland-based video output (default: no).
-    This is mainly useful for benchmarking wayland VOs when combined with
-    ``video-sync=display-desync``, ``--audio=no``, and ``--untimed=yes``.
-
 ``--wayland-edge-pixels-pointer=<value>``
     Defines the size of an edge border (default: 16) to initiate client side
     resize events in the wayland contexts with the mouse. This is only active if
@@ -6126,6 +6167,15 @@ them.
 ``--wayland-edge-pixels-touch=<value>``
     Defines the size of an edge border (default: 32) to initiate client side
     resizes events in the wayland contexts with touch events.
+
+``--wayland-internal-vsync=<no|auto|yes>``
+    Controls whether to use mpv's internal vsync for Wayland-base video outputs
+    (default: ``auto``). This is mainly useful for benchmarking wayland VOs when
+    combined with ``video-sync=display-desync``, ``--audio=no``, and
+    ``--untimed=yes``. The special ``auto`` value will disable the internal
+    vsync if the compositor supports the fifo protocol and version 2 of the
+    presentation time protocol when using ``--gpu-api=vulkan``. In any other
+    situation, it is exactly the same as ``yes``.
 
 ``--wayland-present=<yes|no>``
     Enable the use of wayland's presentation time protocol for more accurate
@@ -6810,6 +6860,8 @@ them.
     macvk
         Vulkan on macOS with a metal surface through a translation layer (experimental)
 
+    This is an object settings list option. See `List Options`_ for details.
+
 ``--gpu-api=<type1,type2,...[,]>``
     Specify a priority list of accepted graphics APIs.
 
@@ -6823,6 +6875,8 @@ them.
         Allow only Vulkan (requires a valid/working ``--spirv-compiler``)
     d3d11
         Allow only ``--gpu-context=d3d11``
+
+    This is an object settings list option. See `List Options`_ for details.
 
 ``--opengl-es=<mode>``
     Controls which type of OpenGL context will be accepted:
@@ -6884,9 +6938,9 @@ them.
 ``--target-colorspace-hint=<auto|yes|no>``
     Automatically configure the output colorspace of the display to pass
     through the input values of the stream (e.g. for HDR passthrough), if
-    possible. In ``auto`` mode (the default), the target colorspace is only set,
+    possible. In ``auto`` mode, the target colorspace is only set,
     if the display signals support for HDR colorspace.
-    Requires a supporting driver and ``--vo=gpu-next``. (Default: ``auto``)
+    Requires a supporting driver and ``--vo=gpu-next``. (Default: ``no``)
 
 ``--target-prim=<value>``
     Specifies the primaries of the display. Video colors will be adapted to
@@ -7034,7 +7088,8 @@ them.
     Valid values are:
 
     auto
-        Choose the best curve according to internal heuristics. (Default)
+        Maps to ``bt.2390`` when using ``--vo=gpu``, and to ``spline`` with
+        ``--vo=gpu-next``. (Default)
     clip
         Hard-clip any out-of-range values. Use this when you care about
         perfect color accuracy for in-range values at the cost of completely
@@ -7365,6 +7420,8 @@ them.
         Blend the frame against a 16x16 gray/white tiles background (default).
     none
         Do not blend the frame and leave the alpha as is.
+
+    Background transparency on d3d11 requires ``--d3d11-flip=no``.
 
     Before mpv 0.38.0, this option used to accept a color value specifying the
     background color. This is now done by the ``--background-color`` option.
@@ -7864,17 +7921,49 @@ Miscellaneous
 
     Conversion is not applied to metadata that is updated at runtime.
 
-``--clipboard-enable=<yes|no>``
-    (Windows, Wayland and macOS only)
+``--clipboard-backends=<backend1,backend2,...[,]>``
+    Specify a priority list of the clipboard backends to be used.
+    You can also pass ``help`` to get a complete list of compiled in backends.
 
-    Enable native clipboard support (default: yes). This allows reading and
-    writing to the ``clipboard`` property to get and set clipboard contents.
+    If the list is not empty, it enables native clipboard support for the
+    specified backends. This allows reading and writing to the ``clipboard``
+    property to get and set clipboard contents.
+
+    Native clipboard support is enabled by default. To disable this, remove
+    all backends in this list with ``--clipboard-backends-clr``.
+
+    Note that the default clipboard backends are subject to change,
+    and must not be relied upon.
+
+    The following clipboard backends are implemented:
+
+    ``win32``
+        Windows backend.
+
+    ``mac``
+        macOS backend.
+
+    ``wayland``
+        Wayland backend. This backend is only available if the compositor
+        supports the ``ext-data-control-v1`` protocol.
+
+    ``vo``
+        VO backend. Requires an active VO window, and support differs across
+        platforms. Currently, this is used as a fallback for Wayland
+        compositors without support for the ``ext-data-control-v1``
+        protocol, or if the ``wayland`` backend is disabled.
+
+    This is an object settings list option. See `List Options`_ for details.
 
 ``--clipboard-monitor=<yes|no>``
-    (Windows and macOS only)
+    (Windows, Wayland and macOS only)
 
     Enable clipboard monitoring so that the ``clipboard`` property can be
     observed for content changes (default: no). This only affects clipboard
     implementations which use polling to monitor clipboard updates.
     Other platforms currently ignore this option and always/never notify
     changes.
+
+    On Wayland, this option only has effect on the ``wayland`` backend, and
+    not for the ``vo`` backend. See ``current-clipboard-backend`` property for
+    more details.

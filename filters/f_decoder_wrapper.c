@@ -34,6 +34,7 @@
 
 #include "demux/demux.h"
 #include "demux/packet.h"
+#include "demux/packet_pool.h"
 
 #include "common/codecs.h"
 #include "common/global.h"
@@ -114,17 +115,19 @@ const struct m_sub_options dec_wrapper_conf = {
         {"correct-pts", OPT_BOOL(correct_pts)},
         {"container-fps-override", OPT_DOUBLE(fps_override), M_RANGE(0, DBL_MAX)},
         {"ad", OPT_STRING(audio_decoders),
+            .flags = UPDATE_AD,
             .help = decoder_list_help},
         {"vd", OPT_STRING(video_decoders),
+            .flags = UPDATE_VD,
             .help = decoder_list_help},
         {"audio-spdif", OPT_STRING(audio_spdif),
             .help = decoder_list_help},
         {"video-rotate", OPT_CHOICE(video_rotate, {"no", -1}),
             .flags = UPDATE_IMGPAR, M_RANGE(0, 359)},
         {"video-aspect-override", OPT_ASPECT(movie_aspect),
-            .flags = UPDATE_IMGPAR, M_RANGE(-1, 10)},
+            .flags = UPDATE_IMGPAR, M_RANGE(-2, 10)},
         {"video-aspect-method", OPT_CHOICE(aspect_method,
-            {"bitstream", 1}, {"container", 2}),
+            {"bitstream", 1}, {"container", 2}, {"ignore", 3}),
             .flags = UPDATE_IMGPAR},
         {"vd-queue", OPT_SUBSTRUCT(vdec_queue_opts, vdec_queue_conf)},
         {"ad-queue", OPT_SUBSTRUCT(adec_queue_opts, adec_queue_conf)},
@@ -137,7 +140,7 @@ const struct m_sub_options dec_wrapper_conf = {
     .size = sizeof(struct dec_wrapper_opts),
     .defaults = &(const struct dec_wrapper_opts){
         .correct_pts = true,
-        .movie_aspect = -1.,
+        .movie_aspect = -2.,
         .aspect_method = 2,
         .video_reverse_size = 1 * 1024 * 1024 * 1024,
         .audio_reverse_size = 64 * 1024 * 1024,
@@ -551,13 +554,28 @@ static void fix_image_params(struct priv *p,
         MP_VERBOSE(p, "Decoder format: %s\n", mp_image_params_to_str(params));
     p->dec_format = *params;
 
+    if (!quiet && opts->movie_aspect == 0)
+        MP_WARN(p, "Setting video-aspect-override to 0 is deprecated.\n"
+                   "Use --video-aspect-override=no --video-aspect-mode=ignore instead.\n");
+    if (!quiet && opts->movie_aspect == -1)
+        MP_WARN(p, "Setting video-aspect-override to -1 is deprecated.\n"
+                   "Use --video-aspect-override=no --video-aspect-mode=container instead.\n");
+
     // While mp_image_params normally always have to have d_w/d_h set, the
     // decoder signals unknown bitstream aspect ratio with both set to 0.
     bool use_container = true;
-    if (opts->aspect_method == 1 && m.p_w > 0 && m.p_h > 0) {
+    if (opts->aspect_method == 1 && m.p_w > 0 && m.p_h > 0 &&
+        opts->movie_aspect != -1) {
         if (!quiet)
             MP_VERBOSE(p, "Using bitstream aspect ratio.\n");
         use_container = false;
+    }
+
+    if (opts->aspect_method == 3 && opts->movie_aspect != -1) {
+        if (!quiet)
+            MP_VERBOSE(p, "Ignoring aspect ratio.\n");
+        use_container = false;
+        m.p_w = m.p_h = 1;
     }
 
     if (use_container && c->par_w > 0 && c->par_h) {
@@ -692,7 +710,8 @@ static bool process_decoded_frame(struct priv *p, struct mp_frame *frame)
 
         crazy_video_pts_stuff(p, mpi);
 
-        struct demux_packet *ccpkt = new_demux_packet_from_buf(mpi->a53_cc);
+        struct demux_packet *ccpkt = new_demux_packet_from_buf(p->public.f->packet_pool,
+                                                               mpi->a53_cc);
         if (ccpkt) {
             av_buffer_unref(&mpi->a53_cc);
             ccpkt->pts = mpi->pts;
@@ -1313,7 +1332,7 @@ void lavc_process(struct mp_filter *f, struct lavc_state *state,
             return;
         }
         state->packets_sent = true;
-        talloc_free(pkt);
+        demux_packet_pool_push(f->packet_pool, pkt);
         mp_filter_internal_mark_progress(f);
     } else {
         // Decoding error, or hwdec fallback recovery. Just try again.

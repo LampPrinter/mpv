@@ -20,20 +20,25 @@ The Interface
 
 ::
 
-    +---------+----------+------------------------------------------+----------+
-    | pl prev | pl next  |  title                                   |    cache |
-    +------+--+---+------+---------+-----------+------+-------+-----+-----+----+
+    +------+---------+---------+-----------------------------------------------+
+    | menu | pl prev | pl next | title                                   cache |
+    +------+------+------+---------+-----------+------+-------+-----+-----+----+
     | play | skip | skip | time    |  seekbar  | time | audio | sub | vol | fs |
     |      | back | frwd | elapsed |           | left |       |     |     |    |
     +------+------+------+---------+-----------+------+-------+-----+-----+----+
 
+
+menu
+    =============   ================================================
+    left-click      open the menu
+    =============   ================================================
 
 pl prev
     =============   ================================================
     left-click      play previous file in playlist
     shift+L-click   show the playlist
     middle-click    show the playlist
-    right-click     open the playlist selector
+    right-click     open the playlist menu
     =============   ================================================
 
 pl next
@@ -41,7 +46,7 @@ pl next
     left-click      play next file in playlist
     shift+L-click   show the playlist
     middle-click    show the playlist
-    right-click     open the playlist selector
+    right-click     open the playlist menu
     =============   ================================================
 
 title
@@ -50,9 +55,9 @@ title
 
     =============   ================================================
     left-click      show file and track info
-    shift+L-click   show the filename
-    middle-click    show the filename
-    right-click     show the path
+    shift+L-click   show the path
+    middle-click    show the path
+    right-click     open the history menu
     =============   ================================================
 
 cache
@@ -71,7 +76,7 @@ skip back
     left-click      go to beginning of chapter / previous chapter
     shift+L-click   show chapters
     middle-click    show chapters
-    right-click     open the chapter selector
+    right-click     open the chapter menu
     =============   ================================================
 
 skip frwd
@@ -79,7 +84,7 @@ skip frwd
     left-click      go to next chapter
     shift+L-click   show chapters
     middle-click    show chapters
-    right-click     open the chapter selector
+    right-click     open the chapter menu
     =============   ================================================
 
 time elapsed
@@ -112,14 +117,14 @@ audio and sub
     left-click      cycle audio/sub tracks forward
     shift+L-click   cycle audio/sub tracks backwards
     middle-click    cycle audio/sub tracks backwards
-    right-click     open the audio/sub track selector
+    right-click     open the audio/sub track menu
     mouse wheel     cycle audio/sub tracks forward/backwards
     =============   ================================================
 
 vol
     =============   ================================================
     left-click      toggle mute
-    right-click     open the audio device selector
+    right-click     open the audio device menu
     mouse wheel     volume up/down
     =============   ================================================
 
@@ -213,7 +218,7 @@ Configurable Options
     seekbar or separately if ``seekbarstyle`` is set to ``bar``.
 
 ``seekrangealpha``
-    Default: 200
+    Default: 20
 
     Alpha of the seekable ranges, 0 (opaque) to 255 (fully transparent).
 
@@ -352,6 +357,12 @@ Configurable Options
     Default: auto (auto hide/show on mouse move)
 
     Also supports ``never`` and ``always``
+
+``visibility_modes``
+    Default: never_auto_always
+
+    The list of visibility modes to cycle through when calling the
+    osc-visibility cycle script message. Modes are separated by ``_``.
 
 ``boxmaxchars``
     Default: 80
@@ -508,6 +519,12 @@ Configurable Options
 The following options configure what commands are run when the buttons are
 clicked. ``mbtn_mid`` commands are also triggered with ``shift+mbtn_left``.
 
+``menu_mbtn_left_command=script-binding select/menu; script-message-to osc osc-hide``
+
+``menu_mbtn_mid_command=``
+
+``menu_mbtn_right_command=``
+
 ``playlist_prev_mbtn_left_command=playlist-prev; show-text ${playlist} 3000``
 
 ``playlist_prev_mbtn_mid_command=show-text ${playlist} 3000``
@@ -522,9 +539,9 @@ clicked. ``mbtn_mid`` commands are also triggered with ``shift+mbtn_left``.
 
 ``title_mbtn_left_command=script-binding stats/display-page-5``
 
-``title_mbtn_mid_command=show-text ${filename}``
+``title_mbtn_mid_command=show-text ${path}``
 
-``title_mbtn_right_command=show-text ${path}``
+``title_mbtn_right_command=script-binding select/select-watch-history; script-message-to osc osc-hide``
 
 ``play_pause_mbtn_left_command=cycle pause``
 
@@ -595,6 +612,12 @@ and ``topbar`` layouts.
     custom_button_2_content=🔀
     custom_button_2_mbtn_left_command=playlist-shuffle
 
+    custom_button_3_content=⏱
+    custom_button_3_mbtn_left_command=add speed 1
+    custom_button_3_mbtn_right_command=set speed 1
+    custom_button_3_wheel_up_command=add speed 0.25
+    custom_button_3_wheel_down_command=add speed -0.25
+
 Script Commands
 ~~~~~~~~~~~~~~~
 
@@ -603,7 +626,8 @@ in ``input.conf``, or sent by other scripts.
 
 ``osc-visibility``
     Controls visibility mode ``never`` / ``auto`` (on mouse move) / ``always``
-    and also ``cycle`` to cycle between the modes.
+    and also ``cycle`` to cycle between the modes. If a second argument is
+    passed (any value), then the output on the OSD will be silenced.
 
 ``osc-show``
     Triggers the OSC to show up, just as if user moved mouse.
@@ -621,4 +645,5 @@ to set auto mode (the default) with ``b``::
 
 ``osc-idlescreen``
     Controls the visibility of the mpv logo on idle. Valid arguments are ``yes``,
-    ``no``, and ``cycle`` to toggle between yes and no.
+    ``no``, and ``cycle`` to toggle between yes and no. If a second argument is
+    passed (any value), then the output on the OSD will be silenced.

@@ -20,8 +20,6 @@
 
 #include <unistd.h>
 
-#include <libmpv/client.h>
-
 #include "common.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
@@ -35,26 +33,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 #ifdef MPV_PROTO
     if (!str_startswith(data, size - 1, MPV_STRINGIFY(MPV_PROTO) "://", sizeof(MPV_STRINGIFY(MPV_PROTO) "://") - 1))
-        return 0;
-#endif
-
-#if !defined(MPV_PROTO) || defined(MPV_PROTO_FILE)
-    const uint8_t *data_check = data;
-    size_t size_check = size;
-    size_t prefix_size = sizeof("file://") - 1;
-    if (str_startswith(data, size - 1, "file://", prefix_size)) {
-        data_check += prefix_size;
-        size_check -= prefix_size;
-    }
-    // Exclude some common paths that are not useful for testing.
-    // Exclude -
-    if (size_check == 2 && !strncmp(data_check, "-", 1))
-        return 0;
-    // Exclude relative paths
-    if (str_startswith(data_check, size_check - 1, ".", 1))
-        return 0;
-    // Exclude absolute paths
-    if (str_startswith(data_check, size_check - 1, "/", 1))
         return 0;
 #endif
 

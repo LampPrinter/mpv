@@ -35,9 +35,9 @@
 #include "misc/bstr.h"
 #include "core.h"
 #include "client.h"
-#include "libmpv/client.h"
-#include "libmpv/render.h"
-#include "libmpv/stream_cb.h"
+#include "mpv/client.h"
+#include "mpv/render.h"
+#include "mpv/stream_cb.h"
 
 extern const struct mp_scripting mp_scripting_lua;
 extern const struct mp_scripting mp_scripting_cplugin;
@@ -263,6 +263,7 @@ void mp_load_builtin_scripts(struct MPContext *mpctx)
     load_builtin_script(mpctx, 4, mpctx->opts->lua_load_auto_profiles,
                         "@auto_profiles.lua");
     load_builtin_script(mpctx, 5, mpctx->opts->lua_load_select, "@select.lua");
+    load_builtin_script(mpctx, 6, mpctx->opts->lua_load_positioning, "@positioning.lua");
 }
 
 bool mp_load_scripts(struct MPContext *mpctx)

@@ -37,6 +37,7 @@
 #include "osdep/io.h"
 #include "osdep/threads.h"
 #include "stream/stream.h"
+#include "sub/draw_bmp.h"
 #include "video/fmt-conversion.h"
 #include "video/mp_image.h"
 #include "video/out/placebo/ra_pl.h"
@@ -205,7 +206,6 @@ const struct m_sub_options gl_next_conf = {
     .defaults = &(struct gl_next_opts) {
         .border_background = BACKGROUND_COLOR,
         .inter_preserve = true,
-        .target_hint = -1,
     },
     .size = sizeof(struct gl_next_opts),
     .change_flags = UPDATE_VIDEO,
@@ -291,13 +291,8 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
                             struct mp_image *src)
 {
     struct priv *p = vo->priv;
-    static const bool subfmt_all[SUBBITMAP_COUNT] = {
-        [SUBBITMAP_LIBASS] = true,
-        [SUBBITMAP_BGRA]   = true,
-    };
-
     double pts = src ? src->pts : 0;
-    struct sub_bitmap_list *subs = osd_render(vo->osd, res, pts, flags, subfmt_all);
+    struct sub_bitmap_list *subs = osd_render(vo->osd, res, pts, flags, mp_draw_sub_formats);
 
     frame->overlays = state->overlays;
     frame->num_overlays = 0;
@@ -2300,10 +2295,10 @@ AV_NOWARN_DEPRECATED(
     pars->color_map_params.contrast_smoothness = opts->tone_map.contrast_smoothness;
     pars->color_map_params.gamut_mapping = gamut_modes[opts->tone_map.gamut_mode];
 
+    pars->params.dither_params = NULL;
+    pars->params.error_diffusion = NULL;
+
     switch (opts->dither_algo) {
-    case DITHER_NONE:
-        pars->params.dither_params = NULL;
-        break;
     case DITHER_ERROR_DIFFUSION:
         pars->params.error_diffusion = pl_find_error_diffusion_kernel(opts->error_diffusion);
         if (!pars->params.error_diffusion) {
@@ -2322,8 +2317,10 @@ AV_NOWARN_DEPRECATED(
         break;
     }
 
-    if (opts->dither_depth < 0)
+    if (opts->dither_depth < 0) {
         pars->params.dither_params = NULL;
+        pars->params.error_diffusion = NULL;
+    }
 
     update_icc_opts(p, opts->icc_opts);
 

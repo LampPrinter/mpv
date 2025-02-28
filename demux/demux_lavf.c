@@ -121,6 +121,7 @@ const struct m_sub_options demux_lavf_conf = {
         .linearize_ts = -1,
         .propagate_opts = true,
     },
+    .change_flags = UPDATE_DEMUXER,
 };
 
 struct format_hack {
@@ -224,6 +225,7 @@ struct stream_info {
 typedef struct lavf_priv {
     struct stream *stream;
     bool own_stream;
+    bool is_dvd_bd;
     char *filename;
     struct format_hack format_hack;
     const AVInputFormat *avif;
@@ -331,9 +333,14 @@ static int64_t mp_seek(void *opaque, int64_t pos, int whence)
         return -1;
 
     int64_t current_pos = stream_tell(stream);
-    if (stream_seek(stream, pos) == 0) {
-        stream_seek(stream, current_pos);
-        return -1;
+    if (!priv->is_dvd_bd) {
+        if (stream_seek(stream, pos) == 0) {
+            stream_seek(stream, current_pos);
+            return -1;
+        }
+    } else {
+        stream_drop_buffers(stream);
+        stream->pos = current_pos;
     }
 
     return pos;
@@ -437,7 +444,7 @@ static int lavf_check_file(demuxer_t *demuxer, enum demux_check check)
 
     const AVInputFormat *forced_format = NULL;
     const char *format = lavfdopts->format;
-    if (!format)
+    if (!format || !format[0])
         format = s->lavf_type;
     if (!format)
         format = avdevice_format;
@@ -717,7 +724,7 @@ static void handle_new_stream(demuxer_t *demuxer, int i)
             !(st->disposition & AV_DISPOSITION_TIMED_THUMBNAILS))
         {
             sh->attached_picture =
-                new_demux_packet_from_avpacket(&st->attached_pic);
+                new_demux_packet_from_avpacket(demuxer->packet_pool, &st->attached_pic);
             if (sh->attached_picture) {
                 sh->attached_picture->pts = 0;
                 talloc_steal(sh, sh->attached_picture);
@@ -1170,6 +1177,15 @@ static int demux_open_lavf(demuxer_t *demuxer, enum demux_check check)
         priv->stream = NULL;
     }
 
+    if (priv->stream) {
+        const char *sname = priv->stream->info->name;
+        priv->is_dvd_bd = strcmp(sname, "dvdnav") == 0 ||
+                          strcmp(sname, "ifo_dvdnav") == 0 ||
+                          strcmp(sname, "bd") == 0 ||
+                          strcmp(sname, "bdnav") == 0 ||
+                          strcmp(sname, "bdmv/bluray") == 0;
+    }
+
     return 0;
 
 fail:
@@ -1221,7 +1237,7 @@ static bool demux_lavf_read_packet(struct demuxer *demux,
         return true;
     }
 
-    struct demux_packet *dp = new_demux_packet_from_avpacket(pkt);
+    struct demux_packet *dp = new_demux_packet_from_avpacket(demux->packet_pool, pkt);
     if (!dp) {
         av_packet_unref(pkt);
         return true;
@@ -1276,6 +1292,16 @@ static bool demux_lavf_read_packet(struct demuxer *demux,
 
     *mp_pkt = dp;
     return true;
+}
+
+static void demux_drop_buffers_lavf(demuxer_t *demuxer)
+{
+    lavf_priv_t *priv = demuxer->priv;
+    av_seek_frame(priv->avfc, -1, 0, 1);
+    demux_flush(demuxer);
+    stream_drop_buffers(priv->stream);
+    avio_flush(priv->avfc->pb);
+    avformat_flush(priv->avfc);
 }
 
 static void demux_seek_lavf(demuxer_t *demuxer, double seek_pts, int flags)
@@ -1408,6 +1434,7 @@ const demuxer_desc_t demuxer_desc_lavf = {
     .desc = "libavformat",
     .read_packet = demux_lavf_read_packet,
     .open = demux_open_lavf,
+    .drop_buffers = demux_drop_buffers_lavf,
     .close = demux_close_lavf,
     .seek = demux_seek_lavf,
     .switched_tracks = demux_lavf_switched_tracks,

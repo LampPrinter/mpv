@@ -290,7 +290,6 @@ jobs:
       env:
         CC: "${{ matrix.config.cc }}"
         CXX: "${{ matrix.config.cxx }}"
-        ASAN_OPTIONS: "halt_on_error=1:abort_on_error=1:print_summary=1:detect_leaks=0"
     strategy:
       matrix:
         config:
@@ -318,6 +317,7 @@ jobs:
       - name: Run meson tests
         id: tests
         run: |
+          export LSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/.lsan_suppressions"
           meson test -C build
 
       - name: Print meson test log
@@ -505,7 +505,6 @@ jobs:
       matrix:
         sys:
           - clang64
-          - mingw32
           - mingw64
           - ucrt64
     defaults:
@@ -524,8 +523,10 @@ jobs:
           update: true
           install: git
           pacboy: >-
+            angleproject:p
             ca-certificates:p
             cc:p
+            cppwinrt:p
             ffmpeg:p
             lcms2:p
             libarchive:p
@@ -539,16 +540,13 @@ jobs:
             ninja:p
             pkgconf:p
             python:p
+            rst2pdf:p
+            rubberband:p
             shaderc:p
             spirv-cross:p
             uchardet:p
             vapoursynth:p
             vulkan-devel:p
-
-      - name: Install dependencies
-        if: ${{ matrix.sys != 'mingw32' }}
-        run: |
-          pacboy --noconfirm -S {angleproject,cppwinrt,rst2pdf,rubberband}:p
 
       - name: Build with meson
         id: build

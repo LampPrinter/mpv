@@ -1,8 +1,10 @@
 CONSOLE
 =======
 
-The console is a REPL for mpv input commands. It is displayed on the video
-window. It also shows log messages. It can be disabled entirely using the
+This script provides the ability to process the user's textual input to other
+scripts through the ``mp.input`` API. It also has a builtin mode of operation to
+complete and run mpv input commands and print mpv's log. It can be displayed on
+both the video window and the terminal. It can be disabled entirely using the
 ``--load-console=no`` option.
 
 Keybindings
@@ -98,9 +100,6 @@ Shift+TAB
 Ctrl+l
     Clear all log messages from the console.
 
-MBTN_RIGHT
-    Hide the console.
-
 MBTN_MID
     Paste text (uses the primary selection on X11 and Wayland).
 
@@ -158,14 +157,39 @@ Configurable Options
 ``font_size``
     Default: 24
 
-    Set the font size used for the REPL and the console. This will be
-    multiplied by ``display-hidpi-scale`` when the console is not scaled with
-    the window.
+    The font size. This will be multiplied by ``display-hidpi-scale`` when the
+    console is not scaled with the window.
 
 ``border_size``
     Default: 1.65
 
-    Set the font border size used for the REPL and the console.
+    The font border size.
+
+``background_alpha``
+    Default: 80
+
+    The transparency of the menu's background. Ranges from 0 (opaque) to 255
+    (fully transparent).
+
+``padding``
+    Default: 10
+
+    The padding of the menu.
+
+``menu_outline_size``
+    Default: 0
+
+    The size of the menu's border.
+
+``menu_outline_color``
+    Default: #FFFFFF
+
+    The color of the menu's border.
+
+``corner_radius``
+    Default: 8
+
+    The radius of the menu's corners.
 
 ``margin_x``
     Default: same as ``--osd-margin-x``
@@ -183,6 +207,21 @@ Configurable Options
     Whether to scale the console with the window height. Can be ``yes``, ``no``,
     or ``auto``, which follows the value of ``--osd-scale-by-window``.
 
+``selected_color``
+    Default: ``#222222``
+
+    The color of the selected item.
+
+``selected_back_color``
+    Default: ``#FFFFFF``
+
+    The background color of the selected item.
+
+``match_color``
+    Default: ``#0088FF``
+
+    The color of characters that match the searched string.
+
 ``case_sensitive``
     Default: no on Windows, yes on other platforms.
 
@@ -193,15 +232,19 @@ Configurable Options
 
     Remove duplicate entries in history as to only keep the latest one.
 
+``persist_history``
+    Default: no
+
+    Whether to save the command history to a file and load it.
+
+``history_path``
+    Default: ``~~state/command_history.txt``
+
+    The file path for ``persist_history`` (see `PATHS`_).
+
 ``font_hw_ratio``
     Default: auto
 
     The ratio of font height to font width.
     Adjusts grid width of completions.
     Values in the range 1.8..2.5 make sense for common monospace fonts.
-
-``pause_on_open``
-    Default: no
-
-    Whether to pause playback when the console opens, and resume it when the
-    console is closed, if playback was not already paused.

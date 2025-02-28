@@ -114,6 +114,8 @@ wchar_t *mp_from_utf8(void *talloc_ctx, const char *s)
         abort();
     wchar_t *ret = talloc_array(talloc_ctx, wchar_t, count);
     MultiByteToWideChar(CP_UTF8, 0, s, -1, ret, count);
+    if (count <= 0)
+        abort();
     return ret;
 }
 
@@ -124,6 +126,8 @@ char *mp_to_utf8(void *talloc_ctx, const wchar_t *s)
         abort();
     char *ret = talloc_array(talloc_ctx, char, count);
     WideCharToMultiByte(CP_UTF8, 0, s, -1, ret, count, NULL, NULL);
+    if (count <= 0)
+        abort();
     return ret;
 }
 
@@ -369,8 +373,9 @@ int mp_open(const char *filename, int oflag, ...)
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     // Setting FILE_APPEND_DATA and avoiding GENERIC_WRITE/FILE_WRITE_DATA
     // will make the file handle use atomic append behavior
+    // However to implement ftruncate we need FILE_WRITE_DATA
     static const DWORD append =
-        FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA;
+        FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | FILE_WRITE_DATA;
 
     DWORD access = 0;
     DWORD disposition = 0;
@@ -707,6 +712,13 @@ off_t mp_lseek64(int fd, off_t offset, int whence)
         return (off_t)-1;
     }
     return _lseeki64(fd, offset, whence);
+}
+
+int mp_ftruncate64(int fd, off_t length)
+{
+    if (_chsize_s(fd, length) == 0)
+        return 0;
+    return -1;
 }
 
 _Thread_local

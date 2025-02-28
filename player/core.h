@@ -21,8 +21,6 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 
-#include "libmpv/client.h"
-
 #include "audio/aframe.h"
 #include "clipboard/clipboard.h"
 #include "common/common.h"
@@ -69,7 +67,7 @@ enum seek_type {
     MPSEEK_RELATIVE,
     MPSEEK_ABSOLUTE,
     MPSEEK_FACTOR,
-    MPSEEK_BACKSTEP,
+    MPSEEK_FRAMESTEP,
     MPSEEK_CHAPTER,
 };
 
@@ -259,7 +257,7 @@ typedef struct MPContext {
     struct osd_state *osd;
     char *term_osd_text;
     char *term_osd_status;
-    char *term_osd_subs;
+    char *term_osd_subs[2];
     char *term_osd_contents;
     char *term_osd_title;
     char *last_window_title;
@@ -441,9 +439,12 @@ typedef struct MPContext {
     struct command_ctx *command_ctx;
     struct encode_lavc_context *encode_lavc_ctx;
 
+    struct mp_option_callback *option_callbacks;
+    int num_option_callbacks;
+
     struct mp_ipc_ctx *ipc_ctx;
 
-    int64_t builtin_script_ids[6];
+    int64_t builtin_script_ids[7];
 
     mp_mutex abort_lock;
 
@@ -463,6 +464,7 @@ typedef struct MPContext {
     char *open_format;
     int open_url_flags;
     bool open_for_prefetch;
+    bool demuxer_changed;
     // --- All fields below are owned by open_thread, unless open_done was set
     //     to true.
     struct demuxer *open_res_demuxer;
@@ -502,6 +504,7 @@ void update_playback_speed(struct MPContext *mpctx);
 void uninit_audio_out(struct MPContext *mpctx);
 void uninit_audio_chain(struct MPContext *mpctx);
 void reinit_audio_chain_src(struct MPContext *mpctx, struct track *track);
+float audio_get_gain(struct MPContext *mpctx);
 void audio_update_volume(struct MPContext *mpctx);
 void reload_audio_output(struct MPContext *mpctx);
 void audio_start_ao(struct MPContext *mpctx);
@@ -576,6 +579,7 @@ int stream_dump(struct MPContext *mpctx, const char *source_filename);
 double get_track_seek_offset(struct MPContext *mpctx, struct track *track);
 bool str_in_list(bstr str, char **list);
 char *mp_format_track_metadata(void *ctx, struct track *t, bool add_lang);
+const char *mp_find_non_filename_media_title(MPContext *mpctx);
 
 // osd.c
 void set_osd_bar(struct MPContext *mpctx, int type,
@@ -583,7 +587,8 @@ void set_osd_bar(struct MPContext *mpctx, int type,
 bool set_osd_msg(struct MPContext *mpctx, int level, int time,
                  const char* fmt, ...) PRINTF_ATTRIBUTE(4,5);
 void set_osd_function(struct MPContext *mpctx, int osd_function);
-void term_osd_set_subs(struct MPContext *mpctx, const char *text);
+void term_osd_clear_subs(struct MPContext *mpctx);
+void term_osd_set_subs(struct MPContext *mpctx, const char *text, int order);
 void get_current_osd_sym(struct MPContext *mpctx, char *buf, size_t buf_size);
 void set_osd_bar_chapters(struct MPContext *mpctx, int type);
 
@@ -594,12 +599,14 @@ void mp_wakeup_core(struct MPContext *mpctx);
 void mp_wakeup_core_cb(void *ctx);
 void mp_core_lock(struct MPContext *mpctx);
 void mp_core_unlock(struct MPContext *mpctx);
+void handle_option_callbacks(struct MPContext *mpctx);
 double get_relative_time(struct MPContext *mpctx);
 void reset_playback_state(struct MPContext *mpctx);
 void set_pause_state(struct MPContext *mpctx, bool user_pause);
 void update_internal_pause_state(struct MPContext *mpctx);
 void update_core_idle_state(struct MPContext *mpctx);
-void add_step_frame(struct MPContext *mpctx, int dir);
+void add_step_frame(struct MPContext *mpctx, int dir, bool use_seek);
+void step_frame_mute(struct MPContext *mpctx, bool mute);
 void queue_seek(struct MPContext *mpctx, enum seek_type type, double amount,
                 enum seek_precision exact, int flags);
 double get_time_length(struct MPContext *mpctx);
