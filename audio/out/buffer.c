@@ -56,7 +56,6 @@ struct buffer_state {
     struct mp_filter *input;    // connected to queue
     struct mp_aframe *pending;  // last, not fully consumed output
 
-    bool got_eof;               // received eof in recent past
     bool streaming;             // AO streaming active
     bool playing;               // logically playing audio from buffer
     bool paused;                // logically paused
@@ -182,7 +181,7 @@ static int ao_read_data_locked(struct ao *ao, void **data, int samples,
                                int64_t out_time_ns, bool *eof, bool pad_silence)
 {
     struct buffer_state *p = ao->buffer_state;
-    assert(!ao->driver->write);
+    mp_assert(!ao->driver->write);
 
     int pos = read_buffer(ao, data, samples, eof, pad_silence);
 
@@ -241,8 +240,8 @@ int ao_read_data_converted(struct ao *ao, struct ao_convert_fmt *fmt,
     if (!ao_need_conversion(fmt))
         return ao_read_data(ao, data, samples, out_time_ns, NULL, true, true);
 
-    assert(ao->format == fmt->src_fmt);
-    assert(ao->channels.num == fmt->channels);
+    mp_assert(ao->format == fmt->src_fmt);
+    mp_assert(ao->channels.num == fmt->channels);
 
     bool planar = af_fmt_is_planar(fmt->src_fmt);
     int planes = planar ? fmt->channels : 1;
@@ -554,10 +553,10 @@ bool init_buffer_post(struct ao *ao)
 {
     struct buffer_state *p = ao->buffer_state;
 
-    assert(ao->driver->start);
+    mp_assert(ao->driver->start);
     if (ao->driver->write) {
-        assert(ao->driver->reset);
-        assert(ao->driver->get_state);
+        mp_assert(ao->driver->reset);
+        mp_assert(ao->driver->get_state);
     }
 
     mp_mutex_init(&p->lock);
@@ -642,7 +641,7 @@ static bool ao_play_data(struct ao *ao)
     int space = state.free_samples;
     if (!space)
         return false;
-    assert(space >= 0);
+    mp_assert(space >= 0);
 
     int samples = 0;
     bool got_eof = false;
@@ -656,7 +655,7 @@ static bool ao_play_data(struct ao *ao)
             return false;
         }
         planes = (void **)mp_aframe_get_data_rw(p->temp_buf);
-        assert(planes);
+        mp_assert(planes);
 
         if (p->recover_pause) {
             samples = MPCLAMP(p->prepause_state.delay * ao->samplerate, 0, space);
@@ -683,19 +682,13 @@ static bool ao_play_data(struct ao *ao)
             p->streaming = true;
             state.playing = true;
         }
-    } else if (p->streaming && p->got_eof && !samples) {
-        p->got_eof = false;
-        state.playing = false;
-        goto eof;
     }
 
     MP_TRACE(ao, "in=%d space=%d(%d) pl=%d, eof=%d\n",
              samples, space, state.free_samples, p->playing, got_eof);
 
-    if (got_eof) {
-        p->got_eof = got_eof;
+    if (got_eof)
         goto eof;
-    }
 
     return samples > 0 && (samples < space || ao->untimed);
 
