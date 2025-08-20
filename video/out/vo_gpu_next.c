@@ -416,7 +416,7 @@ struct frame_priv {
 
 static int plane_data_from_imgfmt(struct pl_plane_data out_data[4],
                                   struct pl_bit_encoding *out_bits,
-                                  enum mp_imgfmt imgfmt)
+                                  enum mp_imgfmt imgfmt, bool use_uint)
 {
     struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(imgfmt);
     if (!desc.num_planes || !(desc.flags & MP_IMGFLAG_HAS_COMPS))
@@ -498,7 +498,7 @@ static int plane_data_from_imgfmt(struct pl_plane_data out_data[4],
         data->pixel_stride = desc.bpp[p] / 8;
         data->type = (desc.flags & MP_IMGFLAG_TYPE_FLOAT)
                             ? PL_FMT_FLOAT
-                            : PL_FMT_UNORM;
+                            : (use_uint ? PL_FMT_UINT : PL_FMT_UNORM);
     }
 
     if (any_padded && !out_bits)
@@ -607,6 +607,23 @@ static void hwdec_release(pl_gpu gpu, struct pl_frame *frame)
     ra_hwdec_mapper_unmap(p->hwdec_mapper);
 }
 
+static bool format_supported(struct vo *vo, int format, bool use_uint)
+{
+    struct priv *p = vo->priv;
+    struct pl_bit_encoding bits;
+    struct pl_plane_data data[4] = {0};
+    int planes = plane_data_from_imgfmt(data, &bits, format, use_uint);
+    if (!planes)
+        return false;
+
+    for (int i = 0; i < planes; i++) {
+        if (!pl_plane_find_fmt(p->gpu, NULL, &data[i]))
+            return false;
+    }
+
+    return true;
+}
+
 static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src,
                       struct pl_frame *frame)
 {
@@ -670,7 +687,14 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
     } else { // swdec
 
         struct pl_plane_data data[4] = {0};
-        frame->num_planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt);
+        bool use_uint = false;
+
+        // At this point, we know that the format is supported, query_format()
+        // makes sure of that. Just check if we should use UINT as a fallback.
+        if (!format_supported(vo, mpi->imgfmt, false))
+            use_uint = true;
+
+        frame->num_planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt, use_uint);
         for (int n = 0; n < frame->num_planes; n++) {
             struct pl_plane *plane = &frame->planes[n];
             data[n].width = mp_image_plane_w(mpi, n);
@@ -802,6 +826,7 @@ static void apply_target_contrast(struct priv *p, struct pl_color_space *color, 
     // Infinite contrast
     if (opts->target_contrast == -1) {
         color->hdr.min_luma = 1e-7;
+        mp_assert(color->hdr.min_luma > 0);
         return;
     }
 
@@ -1052,8 +1077,11 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         target_csp.hdr.max_cll = 0;
         target_csp.hdr.max_fall = 0;
     }
+    // maxFALL in display metadata is in fact MaxFullFrameLuminance. Wayland
+    // reports it as maxFALL directly, but this doesn't mean the same thing.
+    target_csp.hdr.max_fall = 0;
 
-    struct pl_color_space hint;
+    struct pl_color_space hint = {0};
     bool target_hint = p->next_opts->target_hint == 1 ||
                        (p->next_opts->target_hint == -1 &&
                         target_csp.transfer != PL_COLOR_TRC_UNKNOWN);
@@ -1066,6 +1094,10 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         const struct pl_color_space *source = &frame->current->params.color;
         const struct pl_color_space *target = &target_csp;
         hint = *source;
+        // Apply target contrast to the hint, this is important for SDR, because
+        // libplacebo defaults to 1000:1 contrast ratio otherwise.
+        if (!hint.hdr.min_luma)
+            hint.hdr.min_luma = target->hdr.min_luma;
         if (p->next_opts->target_hint_mode == 0) {
             hint = *target;
             if (pl_color_transfer_is_hdr(hint.transfer) && !pl_primaries_valid(&hint.hdr.prim))
@@ -1085,9 +1117,16 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                 .color      = &hint,
                 .metadata   = PL_HDR_METADATA_ANY,
                 .scaling    = PL_HDR_NITS,
-                .out_min    = &hint.hdr.min_luma,
+                .out_min    = !hint.hdr.min_luma ? &hint.hdr.min_luma : NULL,
                 .out_max    = &hint.hdr.max_luma,
             ));
+            // Set maxCLL to dynamic max luminance. Note that libplacebo uses
+            // max luminace as maxCLL in practice.
+            hint.hdr.max_cll = hint.hdr.max_luma;
+            // Keep maxFALL from static metadata, unless its value is too high.
+            // Could be set to 0, but let's keep it for now.
+            if (hint.hdr.max_fall > hint.hdr.max_cll)
+                hint.hdr.max_fall = 0;
         }
         // Infer missing bits now. This is important so that we don't lose
         // information after user option overrides. For example, if the user
@@ -1111,10 +1150,42 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             hint.transfer = opts->target_trc;
         if (opts->target_peak)
             hint.hdr.max_luma = opts->target_peak;
+        // Always set maxCLL, display uses this metadata and we shouldn't let it
+        // fallback to default value.
+        if (!hint.hdr.max_cll)
+            hint.hdr.max_cll = hint.hdr.max_luma;
+        // If tone mapping is required, adjust maxCLL and maxFALL
+        if (source->hdr.max_luma > hint.hdr.max_luma || opts->tone_map.inverse) {
+            // Set maxCLL to the target luminance if it's not already lower
+            if (!hint.hdr.max_cll || hint.hdr.max_luma < hint.hdr.max_cll || opts->tone_map.inverse)
+                hint.hdr.max_cll = hint.hdr.max_luma;
+            // There's no reliable way to estimate maxFALL here
+            hint.hdr.max_fall = 0;
+        }
+        if (hint.hdr.max_cll && hint.hdr.max_fall > hint.hdr.max_cll)
+            hint.hdr.max_fall = 0;
         apply_target_contrast(p, &hint, hint.hdr.min_luma);
+        if (p->icc_profile)
+            hint = p->icc_profile->csp;
+        if (opts->icc_opts->icc_use_luma) {
+            p->icc_params.max_luma = 0.0f;
+        } else {
+            pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
+                .color    = &hint,
+                .metadata = PL_HDR_METADATA_HDR10, // use only static HDR nits
+                .scaling  = PL_HDR_NITS,
+                .out_max  = &p->icc_params.max_luma,
+            ));
+        }
+        pl_icc_update(p->pllog, &p->icc_profile, NULL, &p->icc_params);
+        // Update again after possible max_luma change
+        if (p->icc_profile)
+            hint = p->icc_profile->csp;
         if (!pass_colorspace)
             pl_swapchain_colorspace_hint(p->sw, &hint);
     } else if (!target_hint) {
+        if (!hint.hdr.min_luma)
+            hint.hdr.min_luma = target_csp.hdr.min_luma;
         pl_swapchain_colorspace_hint(p->sw, NULL);
     }
 
@@ -1311,18 +1382,11 @@ static int query_format(struct vo *vo, int format)
     if (ra_hwdec_get(&p->hwdec_ctx, format))
         return true;
 
-    struct pl_bit_encoding bits;
-    struct pl_plane_data data[4] = {0};
-    int planes = plane_data_from_imgfmt(data, &bits, format);
-    if (!planes)
-        return false;
+    bool supported = format_supported(vo, format, false);
+    if (!supported)
+        supported = format_supported(vo, format, true);
 
-    for (int i = 0; i < planes; i++) {
-        if (!pl_plane_find_fmt(p->gpu, NULL, &data[i]))
-            return false;
-    }
-
-    return true;
+    return supported;
 }
 
 static void resize(struct vo *vo)
@@ -1809,7 +1873,7 @@ static void cache_init(struct vo *vo, struct cache *cache, size_t max_size,
 
     char *dir;
     if (dir_opt && dir_opt[0]) {
-        dir = talloc_strdup(vo, dir_opt);
+        dir = mp_get_user_path(vo, p->global, dir_opt);
     } else {
         dir = mp_find_user_file(vo, p->global, "cache", "");
     }
@@ -2111,7 +2175,9 @@ static const struct pl_hook *load_hook(struct priv *p, const char *path)
             return p->user_hooks[i].hook;
     }
 
-    bstr shader = stream_read_file(path, p, p->global, 1000000000); // 1GB
+    char *fname = mp_get_user_path(NULL, p->global, path);
+    bstr shader = stream_read_file(fname, p, p->global, 1000000000); // 1GB
+    talloc_free(fname);
 
     const struct pl_hook *hook = NULL;
     if (shader.len)
@@ -2154,9 +2220,10 @@ static void update_icc_opts(struct priv *p, const struct mp_icc_opts *opts)
     if (p->icc_path && strcmp(opts->profile, p->icc_path) == 0)
         return; // ICC profile hasn't changed
 
-    char *fname = opts->profile;
+    char *fname = mp_get_user_path(NULL, p->global, opts->profile);
     MP_VERBOSE(p, "Opening ICC profile '%s'\n", fname);
     struct bstr icc = stream_read_file(fname, p, p->global, 100000000); // 100 MB
+    talloc_free(fname);
     update_icc(p, icc);
 
     // Update cached path
@@ -2165,7 +2232,7 @@ static void update_icc_opts(struct priv *p, const struct mp_icc_opts *opts)
 
 static void update_lut(struct priv *p, struct user_lut *lut)
 {
-    if (!lut->opt) {
+    if (!lut->opt || !lut->opt[0]) {
         pl_lut_free(&lut->lut);
         TA_FREEP(&lut->path);
         return;
@@ -2179,7 +2246,7 @@ static void update_lut(struct priv *p, struct user_lut *lut)
     talloc_replace(p, lut->path, lut->opt);
 
     // Load LUT file
-    char *fname = lut->path;
+    char *fname = mp_get_user_path(NULL, p->global, lut->path);
     MP_VERBOSE(p, "Loading custom LUT '%s'\n", fname);
     const int lut_max_size = 1536 << 20; // 1.5 GiB, matches lut cache limit
     struct bstr lutdata = stream_read_file(fname, NULL, p->global, lut_max_size);
@@ -2189,6 +2256,7 @@ static void update_lut(struct priv *p, struct user_lut *lut)
     } else {
         lut->lut = pl_lut_parse_cube(p->pllog, lutdata.start, lutdata.len);
     }
+    talloc_free(fname);
     talloc_free(lutdata.start);
 }
 
@@ -2235,6 +2303,11 @@ static void update_hook_opts_dynamic(struct priv *p, const struct pl_hook *hook,
 static void update_hook_opts(struct priv *p, char **opts, const char *shaderpath,
                              const struct pl_hook *hook)
 {
+    for (int i = 0; i < hook->num_parameters; i++) {
+        const struct pl_hook_par *hp = &hook->parameters[i];
+        memcpy(hp->data, &hp->initial, sizeof(*hp->data));
+    }
+
     if (!opts)
         return;
 
@@ -2242,11 +2315,6 @@ static void update_hook_opts(struct priv *p, char **opts, const char *shaderpath
     struct bstr shadername;
     if (!mp_splitext(basename, &shadername))
         shadername = bstr0(basename);
-
-    for (int i = 0; i < hook->num_parameters; i++) {
-        const struct pl_hook_par *hp = &hook->parameters[i];
-        memcpy(hp->data, &hp->initial, sizeof(*hp->data));
-    }
 
     for (int n = 0; opts[n * 2]; n++) {
         struct bstr k = bstr0(opts[n * 2 + 0]);

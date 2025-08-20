@@ -168,7 +168,7 @@ static const m_option_t mp_vo_opt_list[] = {
     {"video-unscaled", OPT_CHOICE(unscaled,
         {"no", 0}, {"yes", 1}, {"downscale-big", 2})},
     {"video-recenter", OPT_BOOL(recenter)},
-    {"wid", OPT_INT64(WinID)},
+    {"wid", OPT_INT64(WinID), .flags = UPDATE_VO},
     {"screen", OPT_CHOICE(screen_id, {"default", -1}), M_RANGE(0, 32)},
     {"screen-name", OPT_STRING(screen_name)},
     {"fs-screen", OPT_CHOICE(fsscreen_id, {"all", -2}, {"current", -1}),
@@ -1061,7 +1061,7 @@ static const struct MPOpts mp_default_opts = {
     },
     .audio_exts = (char *[]){
         "aac", "ac3", "aiff", "ape", "au", "dts", "eac3", "flac", "m4a", "mka",
-        "mp3", "oga", "ogg", "ogm", "opus", "thd", "wav", "wav", "wma", "wv", NULL
+        "mp3", "oga", "ogg", "ogm", "opus", "thd", "wav", "wma", "wv", NULL
     },
     .image_exts = (char *[]){
         "avif", "bmp", "gif", "heic", "heif", "j2k", "jp2", "jpeg", "jpg",
