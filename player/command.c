@@ -41,6 +41,7 @@
 #include "common/stats.h"
 #include "filters/f_decoder_wrapper.h"
 #include "command.h"
+#include "osdep/als.h"
 #include "osdep/threads.h"
 #include "osdep/timer.h"
 #include "common/common.h"
@@ -326,11 +327,11 @@ static char *append_selected_style(struct MPContext *mpctx, char *str)
                mpctx->video_out->osd->opts->osd_selected_color.b,
                mpctx->video_out->osd->opts->osd_selected_color.g,
                mpctx->video_out->osd->opts->osd_selected_color.r,
-               255 - mpctx->video_out->osd->opts->osd_selected_color.a,
+               (uint8_t)(255 - mpctx->video_out->osd->opts->osd_selected_color.a),
                mpctx->video_out->osd->opts->osd_selected_outline_color.b,
                mpctx->video_out->osd->opts->osd_selected_outline_color.g,
                mpctx->video_out->osd->opts->osd_selected_outline_color.r,
-               255 - mpctx->video_out->osd->opts->osd_selected_outline_color.a,
+               (uint8_t)(255 - mpctx->video_out->osd->opts->osd_selected_outline_color.a),
                OSD_ASS_1);
 }
 
@@ -2837,12 +2838,20 @@ static int mp_property_ambient_light(void *ctx, struct m_property *prop,
                                      int action, void *arg)
 {
     MPContext *mpctx = ctx;
-    struct vo *vo = mpctx->video_out;
-    double lux;
-    if (!vo || vo_control(vo, VOCTRL_GET_AMBIENT_LUX, &lux) < 1)
-        return M_PROPERTY_UNAVAILABLE;
+    if (!mpctx->als_state) {
+        mpctx->als_state = mp_als_create(mpctx, mpctx);
+    }
 
-    return m_property_double_ro(action, arg, lux);
+    double lux;
+    switch (mp_als_get_lux(mpctx->als_state, &lux)) {
+    case MP_ALS_STATUS_OK:
+        return m_property_double_ro(action, arg, lux);
+    case MP_ALS_STATUS_NODEVICE:
+        return M_PROPERTY_UNAVAILABLE;
+    case MP_ALS_STATUS_READFAILED:
+    default:
+        return M_PROPERTY_ERROR;
+    }
 }
 
 static int mp_property_focused(void *ctx, struct m_property *prop,
@@ -7347,11 +7356,14 @@ const struct mp_cmd_def mp_cmds[] = {
     { "screenshot", cmd_screenshot,
         {
             {"flags", OPT_FLAGS(v.i,
-                {"video", 4|0}, {"-", 4|0},
-                {"window", 4|1},
-                {"subtitles", 4|2},
-                {"each-frame", 8}),
-                OPTDEF_INT(4|2)},
+                {"video", 0},
+                {"scaled", 1},
+                {"subtitles", 2},
+                {"osd", 4},
+                {"each-frame", 8},
+                {"-", 0},
+                {"window", 1|2|4}),
+                OPTDEF_INT(2)},
             // backwards compatibility
             {"legacy", OPT_CHOICE(v.i,
                 {"unused", 0}, {"single", 0},
@@ -7365,8 +7377,10 @@ const struct mp_cmd_def mp_cmds[] = {
             {"filename", OPT_STRING(v.s)},
             {"flags", OPT_CHOICE(v.i,
                 {"video", 0},
-                {"window", 1},
-                {"subtitles", 2}),
+                {"scaled", 1},
+                {"subtitles", 2},
+                {"osd", 4},
+                {"window", 1|2|4}),
                 OPTDEF_INT(2)},
         },
         .spawn_thread = true,
@@ -7375,8 +7389,10 @@ const struct mp_cmd_def mp_cmds[] = {
         {
             {"flags", OPT_CHOICE(v.i,
                 {"video", 0},
-                {"window", 1},
-                {"subtitles", 2}),
+                {"scaled", 1},
+                {"subtitles", 2},
+                {"osd", 4},
+                {"window", 1|2|4}),
                 OPTDEF_INT(2)},
              {"format", OPT_CHOICE(v.i,
                 {"bgr0", 0},
@@ -7789,8 +7805,10 @@ void run_command_opts(struct MPContext *mpctx)
     for (int i = 0; opts->input_commands[i]; i++) {
         struct mp_cmd *cmd = mp_input_parse_cmd(mpctx->input, bstr0(opts->input_commands[i]),
                                                 "the command line");
-        cmd->coalesce = true;
-        mp_input_queue_cmd(mpctx->input, cmd);
+        if (cmd) {
+            cmd->coalesce = true;
+            mp_input_queue_cmd(mpctx->input, cmd);
+        }
     }
     ctx->command_opts_processed = true;
 }
@@ -7999,7 +8017,7 @@ void mp_option_run_callback(struct MPContext *mpctx, struct mp_option_callback *
             queue_seek(mpctx, MPSEEK_RELATIVE, 0.0, MPSEEK_EXACT, 0);
     }
 
-    if (opt_ptr == &opts->vo->android_surface_size) {
+    if (opt_ptr == &opts->vo->android_surface_size || opt_ptr == &opts->vo->d3d11_composition_size) {
         if (mpctx->video_out)
             vo_control(mpctx->video_out, VOCTRL_EXTERNAL_RESIZE, NULL);
     }
@@ -8034,6 +8052,17 @@ void mp_option_run_callback(struct MPContext *mpctx, struct mp_option_callback *
             }
         }
     }
+
+#if HAVE_LIBBLURAY
+    if (opt_ptr == &opts->stream_bluray_opts->angle) {
+        struct demuxer *demuxer = mpctx->demuxer;
+        if (mpctx->playback_initialized && demuxer && demuxer->stream && strcmp(demuxer->stream->info->name, "bdvm/bluray")) {
+            int angle = opts->stream_bluray_opts->angle - 1;
+            stream_control(demuxer->stream, STREAM_CTRL_SET_ANGLE, &angle);
+            demux_flush(demuxer);
+        }
+    }
+#endif
 
     if (opt_ptr == &opts->pause)
         set_pause_state(mpctx, opts->pause);

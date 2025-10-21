@@ -107,6 +107,8 @@ extern const struct m_sub_options egl_conf;
 
 extern const struct m_sub_options mp_sub_filter_opts;
 
+extern const struct m_sub_options w32_register_conf;
+
 static const struct m_sub_options screenshot_conf = {
     .opts = image_writer_opts,
     .size = sizeof(struct image_writer_opts),
@@ -243,6 +245,9 @@ static const m_option_t mp_vo_opt_list[] = {
 #if HAVE_EGL_ANDROID
     {"android-surface-size", OPT_SIZE_BOX(android_surface_size)},
 #endif
+#if HAVE_D3D11
+    {"d3d11-composition-size", OPT_SIZE_BOX(d3d11_composition_size)},
+#endif
     {"swapchain-depth", OPT_INT(swapchain_depth), M_RANGE(1, VO_MAX_SWAPCHAIN_DEPTH)},
     {"override-display-fps", OPT_REPLACED("display-fps-override")},
     {0}
@@ -282,7 +287,7 @@ const struct m_sub_options vo_sub_opts = {
         .mmcss_profile = "Playback",
         .ontop_level = -1,
         .timing_offset = 0.050,
-        .swapchain_depth = 3,
+        .swapchain_depth = 2,
         .focus_on = 1,
     },
 };
@@ -299,6 +304,8 @@ const struct m_sub_options mp_subtitle_sub_opts = {
         {"stretch-image-subs-to-screen", OPT_BOOL(stretch_image_subs)},
         {"image-subs-video-resolution", OPT_BOOL(image_subs_video_res)},
         {"sub-fix-timing", OPT_BOOL(sub_fix_timing)},
+        {"sub-fix-timing-threshold", OPT_INT(sub_fix_timing_threshold)},
+        {"sub-fix-timing-keep", OPT_INT(sub_fix_timing_keep)},
         {"sub-stretch-durations", OPT_BOOL(sub_stretch_durations)},
         {"sub-gauss", OPT_FLOAT(sub_gauss), M_RANGE(0.0, 3.0)},
         {"sub-gray", OPT_BOOL(sub_gray)},
@@ -346,6 +353,8 @@ const struct m_sub_options mp_subtitle_sub_opts = {
     .defaults = &(OPT_BASE_STRUCT){
         .sub_speed = 1.0,
         .ass_enabled = true,
+        .sub_fix_timing_threshold = 210,
+        .sub_fix_timing_keep = 400,
         .sub_scale_by_window = true,
         .sub_use_margins = true,
         .sub_scale_with_window = true,
@@ -522,6 +531,7 @@ static const m_option_t mp_opts[] = {
     {"msg-module", OPT_BOOL(msg_module), .flags = UPDATE_TERM},
     {"msg-time", OPT_BOOL(msg_time), .flags = UPDATE_TERM},
 #if HAVE_WIN32_DESKTOP
+    {"", OPT_SUBSTRUCT(w32_register_opts, w32_register_conf)},
     {"priority", OPT_CHOICE(w32_priority,
         {"no",          0},
         {"realtime",    REALTIME_PRIORITY_CLASS},
@@ -565,6 +575,7 @@ static const m_option_t mp_opts[] = {
     {"load-select", OPT_BOOL(lua_load_select), .flags = UPDATE_BUILTIN_SCRIPTS},
     {"load-positioning", OPT_BOOL(lua_load_positioning), .flags = UPDATE_BUILTIN_SCRIPTS},
     {"load-commands", OPT_BOOL(lua_load_commands), .flags = UPDATE_BUILTIN_SCRIPTS},
+    {"load-context-menu", OPT_BOOL(lua_load_context_menu), .flags = UPDATE_BUILTIN_SCRIPTS},
 #endif
 
 // ------------------------- stream options --------------------
@@ -1000,6 +1011,9 @@ static const struct MPOpts mp_default_opts = {
     .lua_load_select = true,
     .lua_load_positioning = true,
     .lua_load_commands = true,
+#ifndef _WIN32
+    .lua_load_context_menu = true,
+#endif
 #endif
     .auto_load_scripts = true,
     .loop_times = 1,
@@ -1057,7 +1071,8 @@ static const struct MPOpts mp_default_opts = {
     .media_controls = true,
     .video_exts = (char *[]){
         "3g2", "3gp", "avi", "flv", "ivf", "m2ts", "m4v", "mj2", "mkv", "mov",
-        "mp4", "mpeg", "mpg", "ogv", "rmvb", "ts", "webm", "wmv", "y4m", NULL
+        "mp4", "mpeg", "mpg", "mxf", "ogv", "rmvb", "ts", "webm", "wmv", "y4m",
+        NULL
     },
     .audio_exts = (char *[]){
         "aac", "ac3", "aiff", "ape", "au", "dts", "eac3", "flac", "m4a", "mka",

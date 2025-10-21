@@ -326,9 +326,6 @@ mswin_flags = ['-D_WIN32_WINNT=0x0A00', '-DWINVER=0x0A00', '-DUNICODE',
                '-D_CRT_DECLARE_NONSTDC_NAMES', '-D_CRT_NONSTDC_NO_WARNINGS',
                '-D_CRT_SECURE_NO_WARNINGS', '-DWINRT_NO_SOURCE_LOCATION']
 
-# https://developercommunity.visualstudio.com/t/NAN-is-no-longer-compile-time-constant-i/10688907
-mswin_flags += '-D_UCRT_NOISY_NAN'
-
 if host_machine.system() == 'windows'
     flags += [mswin_flags]
     flags_c += ['-U__STRICT_ANSI__']
@@ -406,13 +403,18 @@ add_project_link_arguments(link_flags, language: ['c', 'cpp', 'objc'])
 
 
 # osdep
+if darwin
+    path_source = files('osdep/path-darwin.c')
+    timer_source = files('osdep/timer-darwin.c')
+endif
+
 cocoa = dependency('appleframeworks', modules: ['Cocoa', 'IOKit', 'QuartzCore'],
                    required: get_option('cocoa'))
 features += {'cocoa': cocoa.found()}
 if features['cocoa']
     dependencies += cocoa
+    path_source += files('osdep/path-mac.m')
     sources += files('osdep/language-mac.c',
-                     'osdep/path-mac.m',
                      'osdep/utils-mac.c',
                      'osdep/mac/app_bridge.m',
                      'player/clipboard/clipboard-mac.m')
@@ -420,7 +422,6 @@ if features['cocoa']
 endif
 
 if posix
-    path_source = files('osdep/path-unix.c')
     if not get_option('fuzzers') and cc.has_function('fork', prefix : '#include <unistd.h>')
         sources += files('osdep/subprocess-posix.c')
     else
@@ -437,13 +438,15 @@ if posix and not features['cocoa']
     main_fn_source = files('osdep/main-fn-unix.c')
 endif
 
-if darwin
-    path_source = files('osdep/path-darwin.c')
-    timer_source = files('osdep/timer-darwin.c')
+if posix and not darwin
+    path_source = files('osdep/path-unix.c')
+    timer_source = files('osdep/timer-linux.c')
 endif
 
-if posix and not darwin
-    timer_source = files('osdep/timer-linux.c')
+if host_machine.system() == 'linux'
+    sources += files('osdep/als-linux.c')
+else
+    sources += files('osdep/als-voctrl.c')
 endif
 
 features += {'ppoll': cc.has_function('ppoll', args: '-D_GNU_SOURCE',
@@ -518,6 +521,7 @@ if features['win32-desktop']
                      'player/clipboard/clipboard-win.c',
                      'osdep/language-win.c',
                      'osdep/terminal-win.c',
+                     'osdep/w32_register.c',
                      'video/out/w32_common.c',
                      'video/out/win32/displayconfig.c',
                      'video/out/win32/droptarget.c',
@@ -1525,7 +1529,11 @@ if macos_sdk_version != '0.0'
     add_project_link_arguments(objc_link_flags, language: ['c', 'objc'])
 endif
 
-xcrun = find_program('xcrun', required: get_option('swift-build').require(darwin))
+swift = get_option('swift-build').require(
+    darwin and features['cocoa'],
+    error_message: 'cocoa was not found',
+)
+xcrun = find_program('xcrun', required: swift)
 swift_ver = '0.0'
 if xcrun.found()
     swift_prog = find_program(run_command(xcrun, '-find', 'swiftc', check: true).stdout().strip())
@@ -1543,7 +1551,7 @@ sys.stdout.write(swift_ver)
 endif
 
 swift = get_option('swift-build').require(
-    darwin and macos_sdk_version.version_compare('>= 10.15') and swift_ver.version_compare('>= 4.1'),
+    swift.allowed() and macos_sdk_version.version_compare('>= 10.15') and swift_ver.version_compare('>= 4.1'),
     error_message: 'A suitable macos sdk version or swift version could not be found!',
 )
 features += {'swift': swift.allowed()}
@@ -1812,12 +1820,16 @@ if get_option('cplayer')
     mpv = executable('mpv', main_fn_source, objects: libmpv.extract_all_objects(recursive: true), dependencies: dependencies,
                      win_subsystem: get_option('win32-subsystem'), install: true)
 
-    if win32 and get_option('win32-subsystem') != 'console'
-        wrapper_sources= 'osdep/win32-console-wrapper.c'
-        executable('mpv', wrapper_sources, c_args: ['-municode', '-fno-asynchronous-unwind-tables', '-fno-stack-protector'],
-                   link_args: ['-municode', '-nostartfiles', '-nodefaultlibs'],
-                   override_options: ['b_sanitize=none'],
-                   name_suffix: 'com', install: true)
+    if win32
+        if get_option('win32-subsystem') != 'console'
+            wrapper_sources = 'osdep/win32-console-wrapper.c'
+            executable('mpv', wrapper_sources, c_args: ['-municode', '-fno-asynchronous-unwind-tables', '-fno-stack-protector'],
+                       link_args: ['-municode', '-nostartfiles', '-nodefaultlibs'],
+                       override_options: ['b_sanitize=none'],
+                       name_suffix: 'com', install: true)
+        endif
+        install_data(['etc/mpv-register.bat', 'etc/mpv-unregister.bat'],
+                     install_dir: get_option('bindir'))
     endif
 
     if darwin
