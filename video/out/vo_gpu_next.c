@@ -68,6 +68,7 @@ struct osd_entry {
     struct pl_overlay_part *parts;
     int num_parts;
     int change_id;
+    bool active;
 };
 
 struct osd_state {
@@ -517,7 +518,7 @@ static void add_run_overlay(struct priv *p, struct osd_state *state,
     }
 }
 
-static void update_overlays(struct vo *vo, struct mp_osd_res res,
+static bool update_overlays(struct vo *vo, struct mp_osd_res res,
                             int flags, enum pl_overlay_coords coords,
                             struct osd_state *state, struct pl_frame *frame,
                             struct mp_image *src, int stereo_mode, float ref_luma)
@@ -530,6 +531,13 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
     res.h /= div[1];
     struct sub_bitmap_list *subs = osd_render(vo->osd, res, pts, flags, mp_draw_sub_formats);
 
+    int prev_num_overlays = state->num_overlays;
+    bool prev_active[MAX_OSD_PARTS];
+    for (int i = 0; i < MAX_OSD_PARTS; i++) {
+        prev_active[i] = state->entries[i].active;
+        state->entries[i].active = false;
+    }
+    bool changed = false;
     state->num_overlays = 0;
 
     for (int n = 0; n < subs->num_items; n++) {
@@ -537,8 +545,12 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
         if (!item->num_parts || !item->packed)
             continue;
         struct osd_entry *entry = &state->entries[item->render_index];
+        entry->active = true;
+        int prev_id = entry->change_id;
         if (!upload_overlay_tex(vo, entry, item))
             break;
+        if (entry->change_id != prev_id || !prev_active[item->render_index])
+            changed = true;
 
         MP_TARRAY_GROW(p, entry->parts, item->num_parts * div[0] * div[1]);
         entry->num_parts = 0;
@@ -580,10 +592,18 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
         }
     }
 
+    for (int i = 0; i < MAX_OSD_PARTS; i++) {
+        if (prev_active[i] != state->entries[i].active)
+            changed = true;
+    }
+    if (state->num_overlays != prev_num_overlays)
+        changed = true;
+
     frame->overlays = state->overlays;
     frame->num_overlays = state->num_overlays;
 
     talloc_free(subs);
+    return changed;
 }
 
 struct frame_priv {
@@ -1366,7 +1386,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     struct pl_render_params params = pars->params;
     const struct gl_video_opts *opts = p->opts_cache->opts;
     bool will_redraw = frame->display_synced && frame->num_vsyncs > 1;
-    bool cache_frame = will_redraw || frame->still || p->paused;
+    bool cache_frame = will_redraw || frame->still || p->paused || !frame->display_synced;
     bool can_interpolate = opts->interpolation && frame->display_synced &&
                            !frame->still && frame->num_frames > 1 && !p->paused;
     double pts_offset = can_interpolate ? frame->ideal_frame_vsync : 0;
@@ -1376,6 +1396,17 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     params.preserve_mixing_cache = p->next_opts->inter_preserve && !frame->still;
     if (frame->still || p->paused)
         params.frame_mixer = NULL;
+
+    // use cheap scaling while the window is being interactively resized, every resize step
+    // changes the scaling ratio and needs a full re-render. full quality is restored afterwards.
+    if (vo->live_resize) {
+        params.upscaler = &pl_filter_bilinear;
+        params.downscaler = &pl_filter_bilinear;
+        params.plane_upscaler = &pl_filter_bilinear;
+        params.sigmoid_params = NULL;
+        params.disable_linear_scaling = true;
+        params.skip_anti_aliasing = true;
+    }
 
     if (frame->current && frame->current->params.vflip) {
         pl_matrix2x2 m = { .m = {{1, 0}, {0, -1}}, };
@@ -1722,9 +1753,9 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             struct frame_priv *fp = mpi->priv;
             apply_crop(image, p->src, vo->params->w, vo->params->h);
             if (opts->blend_subs) {
-                if (frame->redraw)
-                    p->osd_sync++;
-                if (fp->osd_sync < p->osd_sync) {
+                if (!p->osd_sync)
+                    p->osd_sync = 1;
+                if (frame->redraw || fp->osd_sync < p->osd_sync) {
                     float w = pl_rect_w(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target.crop);
                     float h = pl_rect_h(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target.crop);
                     float rx = w / pl_rect_w(image->crop);
@@ -1741,10 +1772,12 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                     enum pl_overlay_coords rel = opts->blend_subs == BLEND_SUBS_VIDEO
                         ? PL_OVERLAY_COORDS_SRC_CROP : PL_OVERLAY_COORDS_DST_CROP;
                     stats_time_start(p->stats, "osd-blend-update");
-                    update_overlays(vo, res, OSD_DRAW_SUB_ONLY,
-                                    rel, &fp->subs, image, mpi,
-                                    mpi->params.stereo3d, get_ref_luma(p));
+                    bool subs_changed = update_overlays(vo, res, OSD_DRAW_SUB_ONLY,
+                                                        rel, &fp->subs, image, mpi,
+                                                        mpi->params.stereo3d, get_ref_luma(p));
                     stats_time_end(p->stats, "osd-blend-update");
+                    if (frame->redraw && subs_changed)
+                        p->osd_sync++;
                     fp->osd_sync = p->osd_sync;
                 }
             } else {

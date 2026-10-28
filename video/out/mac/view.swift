@@ -166,8 +166,10 @@ class View: NSView, CALayerDelegate {
 
     override func magnify(with event: NSEvent) {
         common.window?.isAnimating = event.phase != .ended
+        common.window?.updatePinching(event.phase)
         event.phase == .ended ? common.windowDidEndLiveResize() : common.windowWillStartLiveResize()
-        common.window?.addWindowScale(Double(event.magnification))
+        // reduce the pinch resize speed by 20%
+        common.window?.addWindowScale(Double(event.magnification) * 0.8)
     }
 
     func signalMouseMovement(_ event: NSEvent) {

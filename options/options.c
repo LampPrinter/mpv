@@ -292,7 +292,7 @@ const struct m_sub_options vo_sub_opts = {
         .wl_present = true,
         .mmcss_profile = "Playback",
         .ontop_level = -1,
-        .timing_offset = 0.050,
+        .timing_offset = 0.0,
         .swapchain_depth = 2,
         .focus_on = 1,
     },

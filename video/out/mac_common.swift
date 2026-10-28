@@ -89,8 +89,12 @@ class MacCommon: Common {
         }
     }
 
+    // pace rendering with the display link during live resize, since display sync of the layer is
+    // disabled then and acquiring the next drawable doesn't block until the next vsync anymore
+    var pacedLiveResize: Bool = false
+
     @objc func swapBuffer() {
-        if option.mac.macos_render_timer > RENDER_TIMER_SYSTEM {
+        if option.mac.macos_render_timer > RENDER_TIMER_SYSTEM || pacedLiveResize {
             swapLock.lock()
             while swapTime < 1 {
                 swapLock.wait()
@@ -123,17 +127,19 @@ class MacCommon: Common {
         }
     }
 
+    func signalSwap() {
+        swapLock.lock()
+        swapTime += 1
+        swapLock.signal()
+        swapLock.unlock()
+    }
+
     override func displayLinkCallback(_ displayLink: CVDisplayLink,
                                       _ inNow: UnsafePointer<CVTimeStamp>,
                                       _ inOutputTime: UnsafePointer<CVTimeStamp>,
                                       _ flagsIn: CVOptionFlags,
                                       _ flagsOut: UnsafeMutablePointer<CVOptionFlags>) -> CVReturn {
-        let signalSwap = {
-            self.swapLock.lock()
-            self.swapTime += 1
-            self.swapLock.signal()
-            self.swapLock.unlock()
-        }
+        let signalSwap = { self.signalSwap() }
 
         if option.mac.macos_render_timer > RENDER_TIMER_SYSTEM {
             if let timer = self.timer, option.mac.macos_render_timer == RENDER_TIMER_PRECISE {
@@ -147,6 +153,10 @@ class MacCommon: Common {
 
         if option.mac.macos_render_timer == RENDER_TIMER_PRESENTATION_FEEDBACK {
             presentation?.add(time: inOutputTime.pointee)
+        }
+
+        if pacedLiveResize {
+            signalSwap()
         }
 
         return kCVReturnSuccess
@@ -164,6 +174,26 @@ class MacCommon: Common {
 
     override func updateICCProfile() {
         flagEvents(VO_EVENT_ICC_PROFILE_CHANGED)
+    }
+
+    override func windowWillStartLiveResize() {
+        if let link = link, CVDisplayLinkIsRunning(link), !pacedLiveResize {
+            swapLock.lock()
+            swapTime = 0
+            swapLock.unlock()
+            pacedLiveResize = true
+        }
+        layer?.inLiveResize = true
+    }
+
+    override func windowDidEndLiveResize() {
+        layer?.inLiveResize = false
+        if pacedLiveResize {
+            pacedLiveResize = false
+            // release a possibly waiting render thread, the display link doesn't signal anymore
+            signalSwap()
+        }
+        windowDidResize()
     }
 
     override func windowDidResize() {

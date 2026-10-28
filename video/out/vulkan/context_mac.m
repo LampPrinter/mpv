@@ -138,6 +138,15 @@ static int mac_vk_control(struct ra_ctx *ctx, int *events, int request, void *ar
     struct priv *p = ctx->priv;
     int ret = [p->vo_mac control:ctx->vo events:events request:request data:arg];
 
+    // let the renderer use cheap settings while the window is being resized
+    bool live_resize = p->vo_mac.layer.inLiveResize;
+    if (ctx->vo->live_resize != live_resize) {
+        ctx->vo->live_resize = live_resize;
+        // render again with the full quality settings once the live resize ended
+        if (!live_resize)
+            ctx->vo->want_redraw = true;
+    }
+
     if (*events & VO_EVENT_RESIZE) {
         if (!resize(ctx))
             return VO_ERROR;

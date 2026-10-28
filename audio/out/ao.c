@@ -240,6 +240,7 @@ static struct ao *ao_init(bool probing, struct mpv_global *global,
         goto fail;
     }
     ao->driver_initialized = true;
+    ao_set_gain(ao, atomic_load(&ao->gain));
 
     ao->sstride = af_fmt_to_bytes(ao->format);
     ao->num_planes = 1;
@@ -612,6 +613,10 @@ void ao_print_devices(struct mpv_global *global, struct mp_log *log,
 
 void ao_set_gain(struct ao *ao, float gain)
 {
+    if (ao->driver_initialized && ao->driver->set_gain) {
+        if (ao->driver->set_gain(ao, gain))
+            return;
+    }
     atomic_store(&ao->gain, gain);
 }
 

@@ -45,6 +45,13 @@ class Common: NSObject {
     var cursorVisibilityWanted: Bool = true
     var needsInitialDraw: Bool = true
 
+    // window size requested via VOCTRL_SET_UNFS_WINDOW_SIZE that wasn't applied on the main thread
+    // yet. returned by VOCTRL_GET_UNFS_WINDOW_SIZE, so relative changes (eg 'add
+    // current-window-scale' of the pinch gesture) in quick succession don't build on a stale size
+    // and get lost. this happens when the core and VO are busy during playback.
+    let pendingUnfsSizeLock = NSLock()
+    var pendingUnfsSize: (Int32, Int32)?
+
     var title: String = "mpv" {
         didSet { if let window = window { window.title = title } }
     }
@@ -605,6 +612,11 @@ class Common: NSObject {
         case VOCTRL_GET_UNFS_WINDOW_SIZE:
             let sizeData = data!.assumingMemoryBound(to: Int32.self)
             let size = UnsafeMutableBufferPointer(start: sizeData, count: 2)
+            if let pending = pendingUnfsSizeLock.withLock({ pendingUnfsSize }) {
+                size[0] = pending.0
+                size[1] = pending.1
+                return VO_TRUE
+            }
             let rect = (Bool(option.vo.hidpi_window_scale) ? window?.unfsContentFrame
                 : window?.unfsContentFramePixel) ?? NSRect(x: 0, y: 0, width: 1280, height: 720)
 
@@ -614,12 +626,31 @@ class Common: NSObject {
         case VOCTRL_SET_UNFS_WINDOW_SIZE:
             let sizeData = data!.assumingMemoryBound(to: Int32.self)
             let size = UnsafeBufferPointer(start: sizeData, count: 2)
-            var rect = NSRect(x: 0, y: 0, width: CGFloat(size[0]), height: CGFloat(size[1]))
+            var requested = (size[0], size[1])
+
+            // apply the min/max size limits when resizing with the pinch gesture
+            if let window = window, window.isPinching {
+                let hidpi = Bool(option.vo.hidpi_window_scale)
+                let scale = hidpi ? 1 : (window.currentScreen?.backingScaleFactor ?? 1)
+                let points = NSSize(width: CGFloat(size[0]) / scale, height: CGFloat(size[1]) / scale)
+                let clamped = window.pinchClampedSize(points)
+                requested = (Int32((clamped.width * scale).rounded()),
+                             Int32((clamped.height * scale).rounded()))
+            }
+
+            pendingUnfsSizeLock.withLock { pendingUnfsSize = requested }
+            var rect = NSRect(x: 0, y: 0, width: CGFloat(requested.0), height: CGFloat(requested.1))
             DispatchQueue.main.async {
                 if let screen = self.window?.currentScreen, !Bool(self.option.vo.hidpi_window_scale) {
                     rect = screen.convertRectFromBacking(rect)
                 }
                 self.window?.updateSize(rect.size)
+                // clear only if no newer size was requested in the meantime
+                self.pendingUnfsSizeLock.withLock {
+                    if let pending = self.pendingUnfsSize, pending == requested {
+                        self.pendingUnfsSize = nil
+                    }
+                }
             }
             return VO_TRUE
         case VOCTRL_GET_DISPLAY_NAMES:

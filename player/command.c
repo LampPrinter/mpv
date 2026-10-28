@@ -5236,6 +5236,10 @@ static void show_property_osd(MPContext *mpctx, const char *name, int osd_mode)
     if (!osd_mode)
         return;
 
+    // Never show OSD messages for current-window-scale changes
+    if (strcmp(name, "current-window-scale") == 0)
+        return;
+
     // hwdec is a special case that must wait until video reconfig
     if (strcmp(name, "hwdec") == 0 && !cmd->hwdec_osd_mode) {
         cmd->hwdec_osd_mode = osd_mode;

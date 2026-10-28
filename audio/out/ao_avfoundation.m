@@ -22,6 +22,7 @@
 #include "common/common.h"
 #include "common/msg.h"
 #include "internal.h"
+#include <stdatomic.h>
 #include "osdep/timer.h"
 #include "ta/ta_talloc.h"
 
@@ -31,6 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 
+#define MAX_AHEAD_NS (250 * 1000 * 1000)
 
 @interface AVObserver : NSObject {
     struct ao *ao;
@@ -45,7 +47,30 @@ struct priv {
     CMAudioFormatDescriptionRef format_description;
     AVObserver *observer;
     int64_t end_time_av;
+    atomic_int generation;
 };
+
+static void feed(struct ao *ao);
+
+static void request_data(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+    [p->renderer requestMediaDataWhenReadyOnQueue:p->queue usingBlock:^{
+        feed(ao);
+    }];
+}
+
+static void throttle(struct ao *ao, int64_t ahead_ns)
+{
+    struct priv *p = ao->priv;
+    [p->renderer stopRequestingMediaData];
+    int gen = atomic_load(&p->generation);
+    int64_t wait_ns = MPMAX(ahead_ns - MAX_AHEAD_NS, 20 * 1000 * 1000);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, wait_ns), p->queue, ^{
+        if (atomic_load(&p->generation) == gen)
+            request_data(ao);
+    });
+}
 
 static int64_t CMTimeGetNanoseconds(CMTime time)
 {
@@ -66,14 +91,21 @@ static void feed(struct ao *ao)
 
     CMBlockBufferRef block_buffer = NULL;
     CMSampleBufferRef sample_buffer = NULL;
+    void *data[] = {NULL};
     OSStatus err;
-
-    int request_sample_count = samplerate / 10;
-    int buffer_size = request_sample_count * sstride;
-    void *data[] = {CFAllocatorAllocate(NULL, buffer_size, 0)};
 
     int64_t cur_time_av = CMTimeGetNanoseconds([p->synchronizer currentTime]);
     int64_t cur_time_mp = mp_time_ns();
+
+    if (p->end_time_av >= 0 && p->end_time_av - cur_time_av > MAX_AHEAD_NS) {
+        throttle(ao, p->end_time_av - cur_time_av);
+        goto finish;
+    }
+
+    int request_sample_count = samplerate / 10;
+    int buffer_size = request_sample_count * sstride;
+    data[0] = CFAllocatorAllocate(NULL, buffer_size, 0);
+
     int64_t end_time_av = MPMAX(p->end_time_av, cur_time_av);
     int64_t time_delta = CMTimeGetNanoseconds(CMTimeMake(request_sample_count, samplerate));
     bool eof;
@@ -83,6 +115,8 @@ static void feed(struct ao *ao)
         ao_stop_streaming(ao);
     }
     if (real_sample_count == 0) {
+        if (!eof)
+            throttle(ao, 0);
         goto finish;
     }
 
@@ -144,17 +178,17 @@ static void start(struct ao *ao)
 {
     struct priv *p = ao->priv;
 
+    atomic_fetch_add(&p->generation, 1);
     p->end_time_av = -1;
     [p->synchronizer setRate:1];
-    [p->renderer requestMediaDataWhenReadyOnQueue:p->queue usingBlock:^{
-        feed(ao);
-    }];
+    request_data(ao);
 }
 
 static void stop(struct ao *ao)
 {
     struct priv *p = ao->priv;
 
+    atomic_fetch_add(&p->generation, 1);
     dispatch_sync(p->queue, ^{
         [p->renderer stopRequestingMediaData];
         [p->renderer flush];
@@ -166,12 +200,33 @@ static bool set_pause(struct ao *ao, bool paused)
 {
     struct priv *p = ao->priv;
 
+    atomic_fetch_add(&p->generation, 1);
     if (paused) {
-        [p->synchronizer setRate:0];
+        dispatch_sync(p->queue, ^{
+            [p->renderer stopRequestingMediaData];
+            [p->synchronizer setRate:0];
+        });
     } else {
         [p->synchronizer setRate:1];
+        request_data(ao);
     }
 
+    return true;
+}
+
+static bool set_gain(struct ao *ao, float gain)
+{
+    struct priv *p = ao->priv;
+    if (!p || !p->renderer)
+        return false;
+
+    if (gain <= 1.0f) {
+        [p->renderer setVolume:gain];
+        atomic_store(&ao->gain, 1.0f);
+    } else {
+        [p->renderer setVolume:1.0f];
+        atomic_store(&ao->gain, gain);
+    }
     return true;
 }
 
@@ -351,14 +406,13 @@ static void uninit(struct ao *ao)
 #endif
 }
 
-#define OPT_BASE_STRUCT struct priv
-
 const struct ao_driver audio_out_avfoundation = {
     .description    = "AVFoundation AVSampleBufferAudioRenderer",
     .name           = "avfoundation",
     .uninit         = uninit,
     .init           = init,
     .control        = control,
+    .set_gain       = set_gain,
     .reset          = stop,
     .start          = start,
     .set_pause      = set_pause,

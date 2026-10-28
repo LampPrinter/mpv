@@ -143,6 +143,7 @@ struct ao_driver {
     int (*init)(struct ao *ao);
     // Optional. See ao_control() etc. in ao.c
     int (*control)(struct ao *ao, enum aocontrol cmd, void *arg);
+    bool (*set_gain)(struct ao *ao, float gain);
     void (*uninit)(struct ao *ao);
     // Stop all audio playback, clear buffers, back to state after init().
     // Optional for pull AOs.

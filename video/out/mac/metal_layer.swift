@@ -60,9 +60,24 @@ class MetalLayer: CAMetalLayer {
         }
     }
 
+    // display sync is disabled during live resize, so frames with the new size are handed to the
+    // compositor immediately instead of waiting for their own vsync slot. windowed content is
+    // always composited, so this doesn't cause tearing. MoltenVK sets this on every swapchain
+    // (re)creation, remember the requested value and apply it after the live resize ended.
+    var requestedDisplaySync: Bool = true
     override var displaySyncEnabled: Bool {
-        didSet {
-            if displaySyncEnabled != oldValue { logState(property: "display sync") }
+        get { return super.displaySyncEnabled }
+        set {
+            requestedDisplaySync = newValue
+            applyDisplaySync()
+        }
+    }
+
+    func applyDisplaySync() {
+        let value = inLiveResize ? false : requestedDisplaySync
+        if super.displaySyncEnabled != value {
+            super.displaySyncEnabled = value
+            logState(property: "display sync")
         }
     }
 
@@ -78,6 +93,25 @@ class MetalLayer: CAMetalLayer {
                 backgroundColor = (wantsAlpha ? NSColor.clear : NSColor.black).cgColor
                 logState(property: "opaque")
             }
+        }
+    }
+
+    // live resizing: prevent distortion of frames that lag behind the window size by keeping
+    // their aspect ratio instead of stretching them to the new layer bounds, and present frames
+    // without display sync to minimise the latency between window frame and content updates.
+    // the renderer also uses cheap scalers during live resize, see vo->live_resize.
+    var previousContentsGravity: CALayerContentsGravity = .resize
+    @objc var inLiveResize: Bool = false {
+        didSet {
+            if inLiveResize == oldValue { return }
+            if inLiveResize {
+                previousContentsGravity = contentsGravity
+                contentsGravity = .resizeAspect
+            } else {
+                contentsGravity = previousContentsGravity
+            }
+            applyDisplaySync()
+            log.verbose("Live resize \(inLiveResize ? "started" : "ended")")
         }
     }
 

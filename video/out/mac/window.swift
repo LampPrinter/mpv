@@ -355,9 +355,28 @@ class Window: NSWindow, NSWindowDelegate {
 
     func updateSize(_ size: NSSize) {
         if let currentSize = contentView?.frame.size, size != currentSize {
-            let newContentFrame = centeredContentSize(for: frame, size: size)
+            var newContentFrame = centeredContentSize(for: frame, size: size)
+            if isPinching { newContentFrame = keepOnScreen(contentRect: newContentFrame) }
             updateFrame(newContentFrame)
         }
+    }
+
+    // moves a content rect so the whole window stays within the usable screen area
+    func keepOnScreen(contentRect cRect: NSRect) -> NSRect {
+        guard let screen = currentScreen ?? screen ?? NSScreen.main else { return cRect }
+        let vf = screen.visibleFrame
+        let wf = frameRect(forContentRect: cRect)
+        var dx: CGFloat = 0
+        var dy: CGFloat = 0
+        if wf.width <= vf.width {
+            if wf.minX < vf.minX { dx = vf.minX - wf.minX }
+            if wf.maxX > vf.maxX { dx = vf.maxX - wf.maxX }
+        }
+        if wf.height <= vf.height {
+            if wf.minY < vf.minY { dy = vf.minY - wf.minY }
+            if wf.maxY > vf.maxY { dy = vf.maxY - wf.maxY }
+        }
+        return cRect.offsetBy(dx: dx, dy: dy)
     }
 
     override func setFrame(_ frameRect: NSRect, display flag: Bool) {
@@ -513,8 +532,51 @@ class Window: NSWindow, NSWindowDelegate {
 
     func addWindowScale(_ scale: Double) {
         if !isInFullscreen {
-            input?.command("add current-window-scale \(scale)")
+            input?.command("no-osd add current-window-scale \(scale)")
         }
+    }
+
+    // pinch resize limits. the pinch flag stays set shortly after the gesture ended, since the
+    // resulting window size changes are applied asynchronously by the core and VO.
+    var isPinching: Bool = false
+    var pinchEndWorkItem: DispatchWorkItem?
+
+    func updatePinching(_ phase: NSEvent.Phase) {
+        pinchEndWorkItem?.cancel()
+        pinchEndWorkItem = nil
+        if phase == .ended || phase == .cancelled {
+            let workItem = DispatchWorkItem { [weak self] in self?.isPinching = false }
+            pinchEndWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+        } else {
+            isPinching = true
+        }
+    }
+
+    // clamps a content size (in points) for pinch resizing, keeping its aspect ratio:
+    // - minimum: a quarter of the screen height
+    // - maximum: the video fills either the full width or the full height of the screen,
+    //   whichever is reached first
+    func pinchClampedSize(_ size: NSSize) -> NSSize {
+        guard let screen = currentScreen ?? screen ?? NSScreen.main,
+              size.width > 0, size.height > 0 else { return size }
+
+        // usable screen area for the content, excluding menu bar, dock and title bar
+        let maxArea = contentRect(forFrameRect: screen.visibleFrame).size
+        let aspect = size.width / size.height
+        var newSize = size
+
+        let minHeight = screen.frame.height / 4
+        if newSize.height < minHeight {
+            newSize = NSSize(width: minHeight * aspect, height: minHeight)
+        }
+
+        let fit = min(maxArea.width / newSize.width, maxArea.height / newSize.height)
+        if fit < 1 {
+            newSize = NSSize(width: newSize.width * fit, height: newSize.height * fit)
+        }
+
+        return newSize
     }
 
     func windowDidChangeScreen(_ notification: Notification) {
