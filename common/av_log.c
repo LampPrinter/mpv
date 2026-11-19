@@ -138,6 +138,19 @@ static void mp_msg_av_log_callback(void *ptr, int level, const char *fmt,
         if (!log_buffer.len)
             goto done;
         const char *prefix = avc ? avclass_item_name(ptr, avc) : NULL;
+        // FFmpeg's HEVC decoder leaks stale Dolby Vision RPU buffers across
+        // skipped non-reference frames during hr-seek (AVDISCARD_NONREF),
+        // spamming this harmless warning on seek preroll. Downgrade to trace.
+        if (mp_level == MSGL_WARN && log == log_decvideo &&
+            prefix && !strcmp(prefix, "hevc") &&
+            bstr_startswith0(log_buffer, "Multiple Dolby Vision RPUs found in one AU. Skipping previous."))
+        {
+            mp_level = MSGL_TRACE;
+            if (!mp_msg_test(log, mp_level)) {
+                log_print_prefix = log_buffer.start[log_buffer.len - 1] == '\n';
+                goto done;
+            }
+        }
         if (log_print_prefix && prefix) {
             mp_msg(log, mp_level, "%s: %.*s", prefix, BSTR_P(log_buffer));
         } else {
