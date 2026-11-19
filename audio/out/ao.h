@@ -34,6 +34,8 @@ enum aocontrol {
     AOCONTROL_SET_MUTE,
     // Has char* as argument, which contains the desired stream title.
     AOCONTROL_UPDATE_STREAM_TITLE,
+    // Pre-warm an idle/stopped audio output device asynchronously while paused.
+    AOCONTROL_PREWARM,
 };
 
 // If set, then the queued audio data is the last. Note that after a while, new

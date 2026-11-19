@@ -207,6 +207,7 @@ struct ao_chain {
     bool start_pts_known;
 
     bool delaying_audio_start;
+    bool resync_delay;
 
     struct track *track;
     struct mp_pin *filter_src;

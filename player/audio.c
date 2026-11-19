@@ -225,6 +225,7 @@ static void ao_chain_reset_state(struct ao_chain *ao_c)
     ao_c->untimed_throttle = false;
     ao_c->underrun = false;
     ao_c->delaying_audio_start = false;
+    ao_c->resync_delay = true;
 }
 
 void reset_audio_state(struct MPContext *mpctx)

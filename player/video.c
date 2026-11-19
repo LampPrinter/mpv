@@ -648,6 +648,15 @@ static void update_avsync_before_frame(struct MPContext *mpctx)
         double pts = mpctx->next_frames[0]->pts;
         if (apts != MP_NOPTS_VALUE && pts != MP_NOPTS_VALUE)
             mpctx->delay = apts + opts->audio_delay - pts;
+        if (mpctx->ao_chain)
+            mpctx->ao_chain->resync_delay = false;
+    } else if (mpctx->audio_status == STATUS_PLAYING &&
+               mpctx->ao_chain && mpctx->ao_chain->resync_delay)
+    {
+        mpctx->ao_chain->resync_delay = false;
+        if (!ao_untimed(mpctx->ao))
+            mpctx->delay = (ao_get_delay(mpctx->ao) - mpctx->time_frame) *
+                           mpctx->video_speed;
     }
 
     if (mpctx->video_status < STATUS_READY && mpctx->audio_status != STATUS_PLAYING) {
