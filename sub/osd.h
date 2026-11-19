@@ -92,6 +92,7 @@ struct sub_bitmaps {
     int packed_w, packed_h;
 
     int change_id;  // Incremented on each change (0 is never used)
+    int bitmap_id;  // Optional ID tracking packed pixel contents independently of geometry
 
     bool video_color_space; // True if the bitmap is in video color space
 };

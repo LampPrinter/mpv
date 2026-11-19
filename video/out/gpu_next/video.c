@@ -57,6 +57,8 @@ struct osd_entry {
     struct pl_overlay_part *parts;
     int num_parts;
     int change_id;
+    int bitmap_id;
+    bool active;
 };
 
 struct overlay_state {
@@ -333,11 +335,15 @@ struct mp_image *mppl_video_get_image(struct mppl_video *p, int imgfmt, int w, i
 }
 
 static bool upload_overlay_tex(struct mppl_video *p, struct osd_entry *entry,
-                               const struct sub_bitmaps *item)
+                               const struct sub_bitmaps *item, bool *tex_uploaded)
 {
+    *tex_uploaded = false;
     pl_fmt tex_fmt = p->osd_fmt[item->format];
-    if (!entry->tex)
+    if (!entry->tex) {
+        entry->change_id = 0;
+        entry->bitmap_id = 0;
         MP_TARRAY_POP(p->sub_tex, p->num_sub_tex, &entry->tex);
+    }
     // pl_tex_recreate() invalidates the texture even when it keeps it, so
     // only call it when the size or format has to change. Textures only
     // ever grow, so a size mismatch means the texture is too small.
@@ -346,6 +352,7 @@ static bool upload_overlay_tex(struct mppl_video *p, struct osd_entry *entry,
         tex->params.h < item->packed_h || tex->params.format != tex_fmt)
     {
         entry->change_id = 0;
+        entry->bitmap_id = 0;
         bool ok = pl_tex_recreate(p->gpu, &entry->tex, &(struct pl_tex_params) {
             .format = tex_fmt,
             .w = MPMAX(item->packed_w, tex ? tex->params.w : 0),
@@ -358,8 +365,12 @@ static bool upload_overlay_tex(struct mppl_video *p, struct osd_entry *entry,
             return false;
         }
     }
-    if (entry->change_id == item->change_id)
+    if ((item->bitmap_id && entry->bitmap_id == item->bitmap_id) ||
+        entry->change_id == item->change_id)
+    {
+        entry->change_id = item->change_id;
         return true;
+    }
     struct pl_tex_transfer_params upload_params = {
         .tex        = entry->tex,
         .rc         = { .x1 = item->packed_w, .y1 = item->packed_h, },
@@ -375,9 +386,12 @@ static bool upload_overlay_tex(struct mppl_video *p, struct osd_entry *entry,
         MP_ERR(p, "Failed uploading OSD texture!\n");
         talloc_free(upload_params.priv);
         entry->change_id = 0;
+        entry->bitmap_id = 0;
         return false;
     }
     entry->change_id = item->change_id;
+    entry->bitmap_id = item->bitmap_id;
+    *tex_uploaded = true;
     return true;
 }
 
@@ -510,7 +524,7 @@ static void add_run_overlay(struct mppl_video *p, struct overlay_state *state,
     }
 }
 
-static void update_overlays(struct mppl_video *p, struct mp_osd_res res,
+static bool update_overlays(struct mppl_video *p, struct mp_osd_res res,
                             int flags, enum pl_overlay_coords coords,
                             struct overlay_state *state, struct pl_frame *frame,
                             struct mp_image *src, int stereo_mode, float ref_luma)
@@ -522,6 +536,13 @@ static void update_overlays(struct mppl_video *p, struct mp_osd_res res,
     res.h /= div[1];
     struct sub_bitmap_list *subs = osd_render(p->osd, res, pts, flags, mp_draw_sub_formats);
 
+    int prev_num_overlays = state->num_overlays;
+    bool prev_active[MAX_OSD_PARTS];
+    for (int i = 0; i < MAX_OSD_PARTS; i++) {
+        prev_active[i] = state->entries[i].active;
+        state->entries[i].active = false;
+    }
+    bool changed = false;
     state->num_overlays = 0;
 
     for (int n = 0; n < subs->num_items; n++) {
@@ -529,9 +550,18 @@ static void update_overlays(struct mppl_video *p, struct mp_osd_res res,
         if (!item->num_parts || !item->packed)
             continue;
         struct osd_entry *entry = &state->entries[item->render_index];
-        if (!upload_overlay_tex(p, entry, item))
+        entry->active = true;
+        int prev_id = entry->change_id;
+        bool tex_uploaded = false;
+        if (!upload_overlay_tex(p, entry, item, &tex_uploaded))
             break;
+        if (tex_uploaded || !prev_active[item->render_index])
+            changed = true;
+        if (entry->change_id != prev_id && !item->bitmap_id)
+            changed = true;
 
+        int prev_parts = entry->num_parts;
+        bool parts_changed = false;
         MP_TARRAY_GROW(p, entry->parts, item->num_parts * div[0] * div[1]);
         entry->num_parts = 0;
         struct pl_color_space color = {0};
@@ -545,6 +575,13 @@ static void update_overlays(struct mppl_video *p, struct mp_osd_res res,
                                     : libass_overlay_color(p, item, src, ref_luma);
             // Emit pl_overlay per each distinct colorspace run
             if (start >= 0 && !pl_color_space_equal(&color, &part_color)) {
+                int run_idx = state->num_overlays;
+                if (run_idx >= prev_num_overlays ||
+                    !pl_color_space_equal(&state->overlays[run_idx].color, &color) ||
+                    state->overlays[run_idx].tex != entry->tex)
+                {
+                    changed = true;
+                }
                 dup_stereo_parts(p, entry, start, res, div);
                 add_run_overlay(p, state, entry, item, &color, start, coords);
                 start = -1;
@@ -564,18 +601,41 @@ static void update_overlays(struct mppl_video *p, struct mp_osd_res res,
                 part.color[2] = ((c >> 8) & 0xFF) / 255.0f;
                 part.color[3] = (255 - (c & 0xFF)) / 255.0f;
             }
-            MP_TARRAY_APPEND(p, entry->parts, entry->num_parts, part);
+            int idx = entry->num_parts;
+            if (!parts_changed &&
+                (idx >= prev_parts || memcmp(&entry->parts[idx], &part, sizeof(part)) != 0))
+            {
+                parts_changed = true;
+            }
+            entry->parts[entry->num_parts++] = part;
         }
         if (start >= 0) {
+            int run_idx = state->num_overlays;
+            if (run_idx >= prev_num_overlays ||
+                !pl_color_space_equal(&state->overlays[run_idx].color, &color) ||
+                state->overlays[run_idx].tex != entry->tex)
+            {
+                changed = true;
+            }
             dup_stereo_parts(p, entry, start, res, div);
             add_run_overlay(p, state, entry, item, &color, start, coords);
         }
+        if (parts_changed || entry->num_parts != prev_parts || div[0] * div[1] > 1)
+            changed = true;
     }
+
+    for (int i = 0; i < MAX_OSD_PARTS; i++) {
+        if (prev_active[i] != state->entries[i].active)
+            changed = true;
+    }
+    if (state->num_overlays != prev_num_overlays)
+        changed = true;
 
     frame->overlays = state->overlays;
     frame->num_overlays = state->num_overlays;
 
     talloc_free(subs);
+    return changed;
 }
 
 struct frame_priv {
@@ -1288,8 +1348,11 @@ static struct frame_params get_frame_params(struct mppl_video *p, struct vo_fram
     pl_options pars = p->pars;
     struct pl_render_params params = pars->params;
     const struct gl_video_opts *opts = p->opts_cache->opts;
-    bool will_redraw = frame->display_synced && frame->num_vsyncs > 1;
-    bool cache_frame = will_redraw || frame->still || p->paused;
+    // Always cache single frames outside live_resize (including the last
+    // display-synced vsync where num_vsyncs <= 1) so libplacebo keeps a
+    // consistent split-pass pipeline and never compiles throwaway fused
+    // downscale + EDR OOTF shaders right after live resize ends.
+    bool cache_frame = true;
     bool can_interpolate = opts->interpolation && frame->display_synced &&
                            !frame->still && frame->num_frames > 1 && !p->paused;
     double pts_offset = can_interpolate ? frame->ideal_frame_vsync : 0;
@@ -1692,9 +1755,9 @@ bool mppl_video_render_frame(struct mppl_video *p, struct vo_frame *frame,
             struct frame_priv *fp = mpi->priv;
             apply_crop(image, p->src, p->image_params.w, p->image_params.h);
             if (opts->blend_subs) {
-                if (frame->redraw)
-                    p->osd_sync++;
-                if (fp->osd_sync < p->osd_sync) {
+                if (!p->osd_sync)
+                    p->osd_sync = 1;
+                if (frame->redraw || fp->osd_sync < p->osd_sync) {
                     float w = pl_rect_w(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target.crop);
                     float h = pl_rect_h(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target.crop);
                     float rx = w / pl_rect_w(image->crop);
@@ -1711,10 +1774,12 @@ bool mppl_video_render_frame(struct mppl_video *p, struct vo_frame *frame,
                     enum pl_overlay_coords rel = opts->blend_subs == BLEND_SUBS_VIDEO
                         ? PL_OVERLAY_COORDS_SRC_CROP : PL_OVERLAY_COORDS_DST_CROP;
                     stats_time_start(p->stats, "osd-blend-update");
-                    update_overlays(p, res, OSD_DRAW_SUB_ONLY,
-                                    rel, &fp->subs, image, mpi,
-                                    mpi->params.stereo3d, get_ref_luma(p));
+                    bool subs_changed = update_overlays(p, res, OSD_DRAW_SUB_ONLY,
+                                                        rel, &fp->subs, image, mpi,
+                                                        mpi->params.stereo3d, get_ref_luma(p));
                     stats_time_end(p->stats, "osd-blend-update");
+                    if (frame->redraw && subs_changed)
+                        p->osd_sync++;
                     fp->osd_sync = p->osd_sync;
                 }
             } else {

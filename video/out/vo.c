@@ -929,6 +929,15 @@ static bool render_frame(struct vo *vo)
     mp_mutex_lock(&in->lock);
 
     if (in->frame_queued) {
+        int64_t now = mp_time_ns();
+        int64_t target = in->frame_queued->display_synced ? 0 :
+                         in->frame_queued->pts - in->flip_queue_offset;
+        if (!in->frame_queued->display_synced && !in->paused &&
+            in->hasframe_rendered && target > now + MP_TIME_MS_TO_NS(6))
+        {
+            in->wakeup_pts = target - MP_TIME_MS_TO_NS(6);
+            goto done;
+        }
         talloc_free(in->current_frame);
         in->current_frame = in->frame_queued;
         in->frame_queued = NULL;
@@ -1003,6 +1012,7 @@ static bool render_frame(struct vo *vo)
             (in->current_frame->num_vsyncs < 1 || !use_vsync);
         // This draw covers every redraw request made so far.
         in->request_redraw = false;
+        vo->want_redraw = false;
         mp_mutex_unlock(&in->lock);
 
         if (can_queue)
@@ -1036,6 +1046,7 @@ static bool render_frame(struct vo *vo)
         mp_mutex_lock(&in->lock);
         in->dropped_frame = prev_drop_count < vo->in->drop_count;
         in->rendering = false;
+        vo->previous_redraw_time = mp_time_ns();
 
         update_vsync_timing_after_swap(vo, &vsync);
     }
@@ -1051,7 +1062,7 @@ static bool render_frame(struct vo *vo)
     // A redraw request that arrived while the VO was unlocked, will be handled
     // by the already queued frame. Clear pending redraw requests to avoid
     // unnecessary wakeups.
-    if (in->frame_queued)
+    if (in->frame_queued && in->frame_queued->display_synced)
         in->request_redraw = false;
 
     if (in->current_frame && in->current_frame->num_vsyncs &&
@@ -1146,17 +1157,21 @@ static MP_THREAD_VOID vo_thread(void *ptr)
         int64_t now = mp_time_ns();
         int64_t wait_until = now + MP_TIME_S_TO_NS(working ? 0 : 1000);
         bool wakeup_on_done = false;
+        bool woke_core_for_pts = false;
         int64_t wakeup_core_after = 0;
 
         mp_mutex_lock(&in->lock);
+        int64_t max_interval = in->vsync_interval > 1 ? in->vsync_interval : 0;
         if (in->wakeup_pts) {
             if (in->wakeup_pts > now) {
                 wait_until = MPMIN(wait_until, in->wakeup_pts);
             } else {
                 in->wakeup_pts = 0;
                 wakeup_core(vo);
+                woke_core_for_pts = true;
             }
         }
+        int64_t wakeup_pts = in->wakeup_pts;
         if (vo->want_redraw) {
             in->want_redraw = true;
             wakeup_core(vo);
@@ -1183,14 +1198,21 @@ static MP_THREAD_VOID vo_thread(void *ptr)
             vo->driver->control(vo, vo_paused ? VOCTRL_PAUSE : VOCTRL_RESUME, NULL);
         if (wait_until > now && redraw) {
             // Allow manual redraws at most at display fps.
-            int64_t max_interval = in->vsync_interval > 1 ? in->vsync_interval : 0;
+            if (woke_core_for_pts) {
+                wait_vo(vo, now + MP_TIME_MS_TO_NS(6));
+                continue;
+            }
+            if (wakeup_pts > 0 && wait_until <= now + max_interval / 2) {
+                wait_vo(vo, wait_until);
+                continue;
+            }
             // Some windowing platforms break if we submit frames too fast.
             if (vo->previous_redraw_time + max_interval <= now) {
                 vo->driver->control(vo, VOCTRL_REDRAW, NULL);
                 do_redraw(vo); // now is a good time
-                vo->previous_redraw_time = now;
+                vo->previous_redraw_time = mp_time_ns();
             } else {
-                wait_vo(vo, now + max_interval);
+                wait_vo(vo, MPMIN(wait_until, vo->previous_redraw_time + max_interval));
             }
             continue;
         }

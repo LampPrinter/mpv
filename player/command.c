@@ -111,6 +111,7 @@ struct command_ctx {
     struct sub_bitmaps overlay_osd[2];
     int overlay_osd_current;
     struct bitmap_packer *overlay_packer;
+    int overlay_packed_id;
 
     struct hook_handler **hooks;
     int num_hooks;
@@ -149,6 +150,12 @@ struct overlay {
     enum pl_color_transfer transfer;
     float max_luma;
     bool video_colorspace;
+    char *file;
+    int offset, stride;
+    int64_t mtime_sec, mtime_nsec;
+    off_t file_size;
+    dev_t st_dev;
+    ino_t st_ino;
 };
 
 struct hook_handler {
@@ -5236,6 +5243,10 @@ static void show_property_osd(MPContext *mpctx, const char *name, int osd_mode)
     if (!osd_mode)
         return;
 
+    // Never show OSD messages for current-window-scale changes
+    if (strcmp(name, "current-window-scale") == 0)
+        return;
+
     // hwdec is a special case that must wait until video reconfig
     if (strcmp(name, "hwdec") == 0 && !cmd->hwdec_osd_mode) {
         cmd->hwdec_osd_mode = osd_mode;
@@ -5389,13 +5400,15 @@ static int edit_filters_osd(struct MPContext *mpctx, enum stream_type mediatype,
     return r;
 }
 
-static void recreate_overlays(struct MPContext *mpctx)
+static void recreate_overlays(struct MPContext *mpctx, bool bitmap_changed)
 {
     struct command_ctx *cmd = mpctx->command_ctx;
     int overlay_next = !cmd->overlay_osd_current;
+    struct sub_bitmaps *cur = &cmd->overlay_osd[cmd->overlay_osd_current];
     struct sub_bitmaps *new = &cmd->overlay_osd[overlay_next];
     new->format = SUBBITMAP_BGRA;
     new->change_id = 1;
+    new->bitmap_id = 0;
 
     bool valid = false;
 
@@ -5419,6 +5432,43 @@ static void recreate_overlays(struct MPContext *mpctx)
                 },
             };
             MP_TARRAY_APPEND(cmd, new->parts, new->num_parts, b);
+        }
+    }
+
+    if (!bitmap_changed && new->num_parts > 0 && cur->format == SUBBITMAP_BGRA &&
+        cur->packed && cur->num_parts == new->num_parts &&
+        cur->packed->w >= cur->packed_w && cur->packed->h >= cur->packed_h)
+    {
+        bool match = true;
+        for (int n = 0; n < new->num_parts; n++) {
+            if (new->parts[n].w != cur->parts[n].w ||
+                new->parts[n].h != cur->parts[n].h)
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            talloc_free(new->packed);
+            new->packed = mp_image_new_ref(cur->packed);
+            if (new->packed) {
+                new->packed_w = cur->packed_w;
+                new->packed_h = cur->packed_h;
+                for (int n = 0; n < new->num_parts; n++) {
+                    new->parts[n].src_x = cur->parts[n].src_x;
+                    new->parts[n].src_y = cur->parts[n].src_y;
+                    new->parts[n].bitmap = cur->parts[n].bitmap;
+                    new->parts[n].stride = cur->parts[n].stride;
+                }
+                if (!cur->bitmap_id) {
+                    if (++cmd->overlay_packed_id == 0)
+                        cmd->overlay_packed_id = 1;
+                    cur->bitmap_id = cmd->overlay_packed_id;
+                }
+                new->bitmap_id = cur->bitmap_id;
+                valid = true;
+                goto done;
+            }
         }
     }
 
@@ -5471,11 +5521,15 @@ static void recreate_overlays(struct MPContext *mpctx)
         b->src_y = pos.y;
     }
 
+    if (++cmd->overlay_packed_id == 0)
+        cmd->overlay_packed_id = 1;
+    new->bitmap_id = cmd->overlay_packed_id;
     valid = true;
 done:
     if (!valid) {
         new->format = SUBBITMAP_EMPTY;
         new->num_parts = 0;
+        new->bitmap_id = 0;
     }
 
     osd_set_bitmaps(mpctx->osd, OSDTYPE_EXTERNAL2, new);
@@ -5484,7 +5538,8 @@ done:
 }
 
 // Set overlay with the given ID to the contents as described by "new".
-static void replace_overlay(struct MPContext *mpctx, int id, struct overlay *new)
+static void replace_overlay(struct MPContext *mpctx, int id, struct overlay *new,
+                            bool bitmap_changed)
 {
     struct command_ctx *cmd = mpctx->command_ctx;
     mp_assert(id >= 0);
@@ -5497,9 +5552,10 @@ static void replace_overlay(struct MPContext *mpctx, int id, struct overlay *new
     struct overlay *ptr = &cmd->overlays[id];
 
     talloc_free(ptr->source);
+    talloc_free(ptr->file);
     *ptr = *new;
 
-    recreate_overlays(mpctx);
+    recreate_overlays(mpctx, bitmap_changed);
 }
 
 static bool
@@ -5564,6 +5620,66 @@ static void cmd_overlay_add(void *pcmd)
     // The source is memory, an fd or a file, never the fuzzer input.
     goto error;
 #endif
+    struct command_ctx *cmdctx = mpctx->command_ctx;
+    bool is_file_path = file[0] != '@' && file[0] != '&';
+    bool stat_ok = false;
+    struct stat st = {0};
+    int64_t mtime_sec = 0, mtime_nsec = 0;
+    if (is_file_path && stat(file, &st) == 0 && S_ISREG(st.st_mode)) {
+        stat_ok = true;
+#if defined(__APPLE__)
+        mtime_sec = st.st_mtimespec.tv_sec;
+        mtime_nsec = st.st_mtimespec.tv_nsec;
+#elif defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200809L
+        mtime_sec = st.st_mtim.tv_sec;
+        mtime_nsec = st.st_mtim.tv_nsec;
+#else
+        mtime_sec = st.st_mtime;
+#endif
+    }
+
+    if (stat_ok && id < cmdctx->num_overlays) {
+        struct overlay *old = &cmdctx->overlays[id];
+        if (old->source && old->file && strcmp(old->file, file) == 0 &&
+            old->offset == offset && old->stride == stride &&
+            old->source->w == w && old->source->h == h &&
+            old->st_dev == st.st_dev && old->st_ino == st.st_ino &&
+            old->file_size == st.st_size &&
+            old->mtime_sec == mtime_sec && old->mtime_nsec == mtime_nsec)
+        {
+            if (old->x == x && old->y == y && old->dw == dw && old->dh == dh &&
+                old->primaries == primaries && old->transfer == transfer &&
+                old->max_luma == max_luma && old->video_colorspace == video_colorspace)
+            {
+                return;
+            }
+            struct mp_image *reused = mp_image_new_ref(old->source);
+            if (reused) {
+                struct overlay overlay = {
+                    .source = reused,
+                    .x = x,
+                    .y = y,
+                    .dw = dw,
+                    .dh = dh,
+                    .primaries = primaries,
+                    .transfer = transfer,
+                    .max_luma = max_luma,
+                    .video_colorspace = video_colorspace,
+                    .file = talloc_strdup(NULL, file),
+                    .offset = offset,
+                    .stride = stride,
+                    .mtime_sec = mtime_sec,
+                    .mtime_nsec = mtime_nsec,
+                    .file_size = st.st_size,
+                    .st_dev = st.st_dev,
+                    .st_ino = st.st_ino,
+                };
+                replace_overlay(mpctx, id, &overlay, false);
+                return;
+            }
+        }
+    }
+
     struct overlay overlay = {
         .source = mp_image_alloc(IMGFMT_BGRA, w, h),
         .x = x,
@@ -5574,9 +5690,19 @@ static void cmd_overlay_add(void *pcmd)
         .transfer = transfer,
         .max_luma = max_luma,
         .video_colorspace = video_colorspace,
+        .file = stat_ok ? talloc_strdup(NULL, file) : NULL,
+        .offset = offset,
+        .stride = stride,
+        .mtime_sec = mtime_sec,
+        .mtime_nsec = mtime_nsec,
+        .file_size = st.st_size,
+        .st_dev = st.st_dev,
+        .st_ino = st.st_ino,
     };
-    if (!overlay.source)
+    if (!overlay.source) {
+        talloc_free(overlay.file);
         goto error;
+    }
     int fd = -1;
     void *p = NULL;
     if (file[0] == '@') {
@@ -5607,10 +5733,11 @@ static void cmd_overlay_add(void *pcmd)
     if (open_or_read_err) {
         MP_ERR(mpctx, "overlay-add: could not open or read '%s'\n", file);
         talloc_free(overlay.source);
+        talloc_free(overlay.file);
         goto error;
     }
 
-    replace_overlay(mpctx, id, &overlay);
+    replace_overlay(mpctx, id, &overlay, true);
     return;
 error:
     cmd->success = false;
@@ -5623,7 +5750,7 @@ static void cmd_overlay_remove(void *p)
     struct command_ctx *cmdctx = mpctx->command_ctx;
     int id = cmd->args[0].v.i;
     if (id >= 0 && id < cmdctx->num_overlays)
-        replace_overlay(mpctx, id, &(struct overlay){0});
+        replace_overlay(mpctx, id, &(struct overlay){0}, true);
 }
 
 static void overlay_uninit(struct MPContext *mpctx)
@@ -5632,7 +5759,7 @@ static void overlay_uninit(struct MPContext *mpctx)
     if (!mpctx->osd)
         return;
     for (int id = 0; id < cmd->num_overlays; id++)
-        replace_overlay(mpctx, id, &(struct overlay){0});
+        replace_overlay(mpctx, id, &(struct overlay){0}, true);
     osd_set_bitmaps(mpctx->osd, OSDTYPE_EXTERNAL2, NULL);
     for (int n = 0; n < 2; n++)
         mp_image_unrefp(&cmd->overlay_osd[n].packed);
