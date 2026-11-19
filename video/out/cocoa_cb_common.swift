@@ -64,15 +64,21 @@ class CocoaCB: Common, EventSubscriber {
 
     func reconfig(_ vo: UnsafeMutablePointer<vo>) {
         eventsLock.withLock { self.vo = vo }
+        updateVideoDisplaySize(vo)
         if backendState == .needsInit {
             DispatchQueue.main.sync { self.initBackend(vo) }
         } else if option.vo.auto_window_resize {
             DispatchQueue.main.async {
+                self.window?.cancelPinchSession()
                 self.updateWindowSize(vo)
                 self.layer?.update(force: true)
                 if self.option.vo.focus_on == 2 {
                     NSApp.activate(ignoringOtherApps: true)
                 }
+            }
+        } else {
+            DispatchQueue.main.async {
+                self.window?.cancelPinchSession()
             }
         }
     }
@@ -81,6 +87,7 @@ class CocoaCB: Common, EventSubscriber {
         let previousActiveApp = getActiveApp()
         initApp()
         initWindow(vo, previousActiveApp)
+        updateCachedWindowGeometry()
         updateICCProfile()
         initWindowState()
 

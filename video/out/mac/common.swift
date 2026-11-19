@@ -45,6 +45,133 @@ class Common: NSObject {
     var cursorVisibilityWanted: Bool = true
     var needsInitialDraw: Bool = true
 
+    // window size requested via VOCTRL_SET_UNFS_WINDOW_SIZE that wasn't applied on the main thread
+    // yet. returned by VOCTRL_GET_UNFS_WINDOW_SIZE, so relative changes (eg 'add
+    // current-window-scale' of the pinch gesture) in quick succession don't build on a stale size
+    // and get lost. this happens when the core and VO are busy during playback.
+    let pendingUnfsSizeLock = NSLock()
+    var pendingUnfsSize: (Int32, Int32)?
+
+    let geometryLock = NSLock()
+    var cachedFramePixelSize: CGSize = .zero
+    var cachedUnfsPointSize: NSSize = NSSize(width: 1280, height: 720)
+    var cachedUnfsPixelSize: NSSize = NSSize(width: 1280, height: 720)
+    var cachedBackingScale: CGFloat = 2.0
+    var videoDisplayPixelSize: NSSize = .zero
+    var isForceWindow: Bool = false
+    var nominalDisplayFps: Double = 120.0
+
+    func clearPendingUnfsSize() {
+        pendingUnfsSizeLock.withLock { pendingUnfsSize = nil }
+    }
+
+    @discardableResult
+    func updateVideoDisplaySize(_ vo: UnsafeMutablePointer<vo>) -> (wasForceWindow: Bool, isForceWindow: Bool) {
+        var vidW: Int32 = 0
+        var vidH: Int32 = 0
+        var newForceWindow = false
+        pthread_mutex_lock(&vo.pointee.params_mutex)
+        if let paramsPtr = vo.pointee.params {
+            newForceWindow = paramsPtr.pointee.force_window
+            if !newForceWindow {
+                mp_image_params_get_dsize(paramsPtr, &vidW, &vidH)
+                if paramsPtr.pointee.rotate % 180 == 90,
+                   let drv = vo.pointee.driver,
+                   (drv.pointee.caps & Int32(VO_CAP_ROTATE90)) != 0
+                {
+                    swap(&vidW, &vidH)
+                }
+            }
+        }
+        pthread_mutex_unlock(&vo.pointee.params_mutex)
+
+        if newForceWindow {
+            let prev = geometryLock.withLock { () -> Bool in
+                let old = isForceWindow
+                isForceWindow = true
+                videoDisplayPixelSize = .zero
+                return old
+            }
+            return (prev, true)
+        }
+
+        if vidW < 1 || vidH < 1 {
+            vidW = vo.pointee.dwidth
+            vidH = vo.pointee.dheight
+        }
+        guard vidW > 0, vidH > 0 else {
+            let prev = geometryLock.withLock { () -> Bool in
+                let old = isForceWindow
+                isForceWindow = false
+                return old
+            }
+            return (prev, false)
+        }
+
+        var w = Double(vidW)
+        var h = Double(vidH)
+        let mpar = Double(vo.pointee.monitor_par)
+        if mpar > 0 {
+            if mpar < 1 {
+                h = min(max(h / mpar, 1), 16000)
+            } else {
+                w = min(max(w * mpar, 1), 16000)
+            }
+        }
+        let prev = geometryLock.withLock { () -> Bool in
+            let old = isForceWindow
+            isForceWindow = false
+            videoDisplayPixelSize = NSSize(width: w, height: h)
+            return old
+        }
+        return (prev, false)
+    }
+
+    func updateCachedWindowGeometry() {
+        guard Thread.isMainThread, let window = self.window else { return }
+        let scale = max(window.backingScaleFactor, 1.0)
+        let framePx = window.convertToBacking(window.frame).size
+        let unfsPt = window.unfsContentFrame.size
+        let unfsPx = window.convertToBacking(window.unfsContentFrame).size
+        var screenMaxFps: Double = 0
+        if #available(macOS 12.0, *), let maxFps = window.screen?.maximumFramesPerSecond, maxFps > 0 {
+            screenMaxFps = Double(maxFps)
+        }
+        geometryLock.withLock {
+            cachedFramePixelSize = framePx
+            cachedUnfsPointSize = unfsPt
+            cachedUnfsPixelSize = unfsPx
+            cachedBackingScale = scale
+            if screenMaxFps > 0 {
+                nominalDisplayFps = screenMaxFps
+            }
+        }
+    }
+
+    func refreshNominalDisplayFps() {
+        var fps: Double = 0
+        if #available(macOS 12.0, *), Thread.isMainThread,
+           let sFps = window?.screen?.maximumFramesPerSecond, sFps > 0
+        {
+            fps = Double(sFps)
+        } else if let link = self.link {
+            let nominalData = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link)
+            if (nominalData.flags & Int32(CVTimeFlags.isIndefinite.rawValue)) < 1 && nominalData.timeValue > 0 {
+                fps = Double(nominalData.timeScale) / Double(nominalData.timeValue)
+            }
+        }
+        if fps > 0 {
+            geometryLock.withLock { nominalDisplayFps = fps }
+        }
+    }
+
+    func videoDisplaySizePoints(fallback: NSSize) -> NSSize {
+        let (vidPx, scale) = geometryLock.withLock { (videoDisplayPixelSize, cachedBackingScale) }
+        guard vidPx.width > 0, vidPx.height > 0 else { return fallback }
+        let divisor: CGFloat = Bool(option.vo.hidpi_window_scale) ? 1.0 : max(scale, 1.0)
+        return NSSize(width: vidPx.width / divisor, height: vidPx.height / divisor)
+    }
+
     let edrLock = NSLock()
     var cachedMaxEDR: Float = 1.0
     var lastNotifiedMaxEDR: Float = 1.0
@@ -126,6 +253,7 @@ class Common: NSObject {
         if option.vo.focus_on == 0 {
             previousActiveApp?.activate()
         }
+        updateCachedWindowGeometry()
         _ = updateEDRState()
     }
 
@@ -206,6 +334,7 @@ class Common: NSObject {
             return self.displayLinkCallback(link, now, out, inFlags, outFlags)
         }
         CVDisplayLinkStart(link)
+        refreshNominalDisplayFps()
     }
 
     func stopDisplaylink() {
@@ -221,6 +350,7 @@ class Common: NSObject {
         }
 
         CVDisplayLinkSetCurrentCGDisplay(link, screen.displayID)
+        refreshNominalDisplayFps()
         queue.asyncAfter(deadline: DispatchTime.now() + 0.1) {
             self.flagEvents(VO_EVENT_WIN_STATE)
         }
@@ -391,6 +521,8 @@ class Common: NSObject {
 
     func handleScreenParametersChanged() {
         if isQuitting { return }
+        updateCachedWindowGeometry()
+        refreshNominalDisplayFps()
         let screen = window?.screen ?? getTargetScreen(forFullscreen: false) ?? NSScreen.main
         let maxEDR = Float(screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
         let maxPotEDR = Float(screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0)
@@ -603,6 +735,8 @@ class Common: NSObject {
     func windowDidChangeScreen() {}
     func windowDidChangeScreenProfile() {}
     func windowDidChangeBackingProperties() {}
+    var hasMainThreadLiveResizeDisplayLink: Bool { return false }
+    func setLiveResizeContentsGravity(_ gravity: CALayerContentsGravity) {}
     func windowWillStartLiveResize() {}
     func windowDidEndLiveResize() {}
     func windowDidResize() {}
@@ -658,6 +792,8 @@ class Common: NSObject {
                      TypeHelper.toPointer(&option.voPtr.pointee.autofit_smaller),
                      TypeHelper.toPointer(&option.voPtr.pointee.autofit_larger):
                     DispatchQueue.main.async {
+                        self.window?.cancelPinchSession()
+                        self.window?.resetVideoReferenceBox()
                         let (_, wr, forcePosition) = self.getInitProperties(vo)
                         forcePosition ? self.window?.updateFrame(wr) : self.window?.updateSize(wr.size)
                     }
@@ -721,21 +857,49 @@ class Common: NSObject {
         case VOCTRL_GET_UNFS_WINDOW_SIZE:
             let sizeData = data!.assumingMemoryBound(to: Int32.self)
             let size = UnsafeMutableBufferPointer(start: sizeData, count: 2)
-            let rect = (Bool(option.vo.hidpi_window_scale) ? window?.unfsContentFrame
-                : window?.unfsContentFramePixel) ?? NSRect(x: 0, y: 0, width: 1280, height: 720)
+            if let pending = pendingUnfsSizeLock.withLock({ pendingUnfsSize }) {
+                size[0] = pending.0
+                size[1] = pending.1
+                return VO_TRUE
+            }
+            let sz = geometryLock.withLock {
+                Bool(option.vo.hidpi_window_scale) ? cachedUnfsPointSize : cachedUnfsPixelSize
+            }
 
-            size[0] = Int32(rect.size.width)
-            size[1] = Int32(rect.size.height)
+            size[0] = Int32(sz.width.rounded())
+            size[1] = Int32(sz.height.rounded())
             return VO_TRUE
         case VOCTRL_SET_UNFS_WINDOW_SIZE:
             let sizeData = data!.assumingMemoryBound(to: Int32.self)
             let size = UnsafeBufferPointer(start: sizeData, count: 2)
-            var rect = NSRect(x: 0, y: 0, width: CGFloat(size[0]), height: CGFloat(size[1]))
+            let requested = (size[0], size[1])
+
+            pendingUnfsSizeLock.withLock { pendingUnfsSize = requested }
+            var rect = NSRect(x: 0, y: 0, width: CGFloat(requested.0), height: CGFloat(requested.1))
             DispatchQueue.main.async {
-                if let screen = self.window?.currentScreen, !Bool(self.option.vo.hidpi_window_scale) {
+                guard let win = self.window else {
+                    self.pendingUnfsSizeLock.withLock {
+                        if let pending = self.pendingUnfsSize, pending == requested {
+                            self.pendingUnfsSize = nil
+                        }
+                    }
+                    return
+                }
+                if !win.pinchGestureActive {
+                    win.cancelPinchSession()
+                    win.resetVideoReferenceBox()
+                }
+                if let screen = win.currentScreen, !Bool(self.option.vo.hidpi_window_scale) {
                     rect = screen.convertRectFromBacking(rect)
                 }
-                self.window?.updateSize(rect.size)
+                let targetSize = win.isPinching ? win.pinchClampedSize(rect.size) : rect.size
+                win.updateSize(targetSize)
+                // clear only if no newer size was requested in the meantime
+                self.pendingUnfsSizeLock.withLock {
+                    if let pending = self.pendingUnfsSize, pending == requested {
+                        self.pendingUnfsSize = nil
+                    }
+                }
             }
             return VO_TRUE
         case VOCTRL_GET_DISPLAY_NAMES:

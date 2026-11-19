@@ -75,6 +75,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     if (sw->fns->target_csp)
         display_csp = sw->fns->target_csp(sw);
     float display_ref_luma = sw->fns->target_ref_luma ? sw->fns->target_ref_luma(sw) : 0;
+    mppl_video_set_live_resize(p->renderer, vo->live_resize);
     mppl_video_begin_frame(p->renderer, frame, display_csp, display_ref_luma);
 
     struct pl_color_space hint = {0};

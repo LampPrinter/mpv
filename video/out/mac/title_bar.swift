@@ -146,6 +146,7 @@ class TitleBar: NSVisualEffectView {
     func show() {
         guard let window = common.window else { return }
         if !window.border && !window.isInFullscreen { return }
+        if window.autoTransitionActive { return }
         let loc = common.view?.convert(window.mouseLocationOutsideOfEventStream, from: nil)
 
         buttons.forEach { $0.isHidden = false }

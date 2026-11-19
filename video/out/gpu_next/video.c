@@ -149,6 +149,7 @@ struct mppl_video {
     bool want_seek_reset;
     bool flush_cache;
     bool paused;
+    bool live_resize;
     int last_ref_white;
     int last_srgb_power22;
     int req_frames;
@@ -1865,6 +1866,18 @@ static struct frame_params get_frame_params(struct mppl_video *p, struct vo_fram
     if (frame->still || p->paused)
         params.frame_mixer = NULL;
 
+    // use cheap scaling while the window is being interactively resized, every resize step
+    // changes the scaling ratio and needs a full re-render. full quality is restored afterwards.
+    if (p->live_resize) {
+        params.upscaler = &pl_filter_bilinear;
+        params.downscaler = &pl_filter_bilinear;
+        params.plane_upscaler = &pl_filter_bilinear;
+        params.sigmoid_params = NULL;
+        params.disable_linear_scaling = true;
+        params.skip_anti_aliasing = true;
+        params.skip_caching_single_frame = true;
+    }
+
     if (frame->current && frame->current->params.vflip) {
         pl_matrix2x2 m = { .m = {{1, 0}, {0, -1}}, };
         pars->distort_params.transform.mat = m;
@@ -2802,6 +2815,11 @@ void mppl_video_configure_queue(struct mppl_video *p, struct vo *vo)
 void mppl_video_set_paused(struct mppl_video *p, bool paused)
 {
     p->paused = paused;
+}
+
+void mppl_video_set_live_resize(struct mppl_video *p, bool live_resize)
+{
+    p->live_resize = live_resize;
 }
 
 bool mppl_video_showing_interpolated_frame(struct mppl_video *p)

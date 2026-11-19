@@ -30,7 +30,7 @@ class View: NSView, CALayerDelegate {
 
     override var isOpaque: Bool {
         if let metalLayer = layer as? CAMetalLayer {
-            return !metalLayer.isOpaque
+            return metalLayer.isOpaque
         }
 
         return true
@@ -50,17 +50,15 @@ class View: NSView, CALayerDelegate {
     }
 
     override func updateTrackingAreas() {
-        if let tracker = self.tracker {
-            removeTrackingArea(tracker)
+        if tracker == nil {
+            tracker = NSTrackingArea(rect: .zero,
+                options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved, .enabledDuringMouseDrag, .inVisibleRect],
+                owner: self, userInfo: nil)
+            // here tracker is guaranteed to be non-nil
+            addTrackingArea(tracker!)
         }
 
-        tracker = NSTrackingArea(rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved, .enabledDuringMouseDrag],
-            owner: self, userInfo: nil)
-        // here tracker is guaranteed to be none-nil
-        addTrackingArea(tracker!)
-
-        if containsMouseLocation() {
+        if !containsMouseLocation() {
             input?.put(key: SWIFT_KEY_MOUSE_LEAVE)
         }
     }
@@ -132,7 +130,15 @@ class View: NSView, CALayerDelegate {
         signalMouseMovement(event)
     }
 
+    private func ensureActiveWindow() {
+        if !NSApp.isActive || !(window?.isKeyWindow ?? true) {
+            NSApp.activate(ignoringOtherApps: true)
+            window?.makeKeyAndOrderFront(nil)
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
+        ensureActiveWindow()
         hasMouseDown = event.clickCount <= 1
         input?.processMouse(event: event)
         lastMouseDownEvent = event
@@ -145,6 +151,7 @@ class View: NSView, CALayerDelegate {
     }
 
     override func rightMouseDown(with event: NSEvent) {
+        ensureActiveWindow()
         hasMouseDown = event.clickCount <= 1
         input?.processMouse(event: event)
     }
@@ -155,6 +162,7 @@ class View: NSView, CALayerDelegate {
     }
 
     override func otherMouseDown(with event: NSEvent) {
+        ensureActiveWindow()
         hasMouseDown = event.clickCount <= 1
         input?.processMouse(event: event)
     }
@@ -165,9 +173,9 @@ class View: NSView, CALayerDelegate {
     }
 
     override func magnify(with event: NSEvent) {
-        common.window?.isAnimating = event.phase != .ended
-        event.phase == .ended ? common.windowDidEndLiveResize() : common.windowWillStartLiveResize()
-        common.window?.addWindowScale(Double(event.magnification))
+        guard let window = common.window, !window.isInFullscreen else { return }
+        // tune pinch resize sensitivity (1.4x of the previous 0.8 factor)
+        window.pinchResize(by: Double(event.magnification) * 1.12, phase: event.phase)
     }
 
     func signalMouseMovement(_ event: NSEvent) {

@@ -510,6 +510,10 @@ struct vo {
     bool want_redraw;   // redraw as soon as possible
     int64_t previous_redraw_time;
 
+    // window is being interactively resized, renderers may use cheaper settings.
+    // set by the windowing context, only accessed on the VO thread.
+    bool live_resize;
+
     // current window state
     int dwidth;
     int dheight;

@@ -29,7 +29,9 @@ class MetalLayer: CAMetalLayer {
         set {
             if Int(newValue.width) > 1 && Int(newValue.height) > 1 {
                 super.drawableSize = newValue
-                flushBackgroundTransactionIfNeeded()
+                if !inLiveResize {
+                    flushBackgroundTransactionIfNeeded()
+                }
             }
         }
     }
@@ -327,15 +329,48 @@ class MetalLayer: CAMetalLayer {
         }
     }
 
+    // display sync is disabled during live resize, so frames with the new size are handed to the
+    // compositor immediately instead of waiting for their own vsync slot. windowed content is
+    // always composited, so this doesn't cause tearing. MoltenVK sets this on every swapchain
+    // (re)creation, remember the requested value and apply it after the live resize ended.
+    var requestedDisplaySync: Bool = true
+    private let displaySyncLock = NSLock()
+    private var _inLiveResize: Bool = false
+
     override var displaySyncEnabled: Bool {
-        didSet {
-            if displaySyncEnabled != oldValue { logState(property: "display sync") }
+        get { return super.displaySyncEnabled }
+        set {
+            let value: Bool = displaySyncLock.withLock {
+                requestedDisplaySync = newValue
+                return _inLiveResize ? false : requestedDisplaySync
+            }
+            if super.displaySyncEnabled != value {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                super.displaySyncEnabled = value
+                CATransaction.commit()
+                logState(property: "display sync")
+            }
+        }
+    }
+
+    func applyDisplaySync() {
+        let value: Bool = displaySyncLock.withLock {
+            _inLiveResize ? false : requestedDisplaySync
+        }
+        if super.displaySyncEnabled != value {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            super.displaySyncEnabled = value
+            CATransaction.commit()
+            logState(property: "display sync")
         }
     }
 
     func disableDisplaySyncForQuit() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        displaySyncLock.withLock { requestedDisplaySync = false }
         if super.displaySyncEnabled {
             super.displaySyncEnabled = false
         }
@@ -349,12 +384,51 @@ class MetalLayer: CAMetalLayer {
         get { return super.isOpaque }
         set {
             opaqueForced = newValue == wantsAlpha
-            if isOpaque == wantsAlpha || opaqueForced {
-                super.isOpaque = !wantsAlpha
+            let desired = !wantsAlpha
+            if super.isOpaque != desired {
+                super.isOpaque = desired
                 backgroundColor = (wantsAlpha ? NSColor.clear : NSColor.black).cgColor
                 logState(property: "opaque")
                 flushBackgroundTransactionIfNeeded()
             }
+        }
+    }
+
+    // live resizing: prevent distortion of frames that lag behind the window size by keeping
+    // their aspect ratio instead of stretching them to the new layer bounds, and present frames
+    // without display sync to minimise the latency between window frame and content updates.
+    // the renderer also uses cheap scalers during live resize, see vo->live_resize.
+    var previousContentsGravity: CALayerContentsGravity = .resizeAspect
+    var liveResizeGravity: CALayerContentsGravity = .resizeAspect {
+        didSet {
+            guard oldValue != liveResizeGravity, inLiveResize else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            contentsGravity = liveResizeGravity
+            CATransaction.commit()
+        }
+    }
+    @objc var inLiveResize: Bool {
+        get { return displaySyncLock.withLock { _inLiveResize } }
+        set {
+            let changed: Bool = displaySyncLock.withLock {
+                if _inLiveResize == newValue { return false }
+                _inLiveResize = newValue
+                return true
+            }
+            if !changed { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if newValue {
+                previousContentsGravity = contentsGravity
+                contentsGravity = liveResizeGravity
+            } else {
+                contentsGravity = previousContentsGravity
+                liveResizeGravity = .resizeAspect
+            }
+            CATransaction.commit()
+            applyDisplaySync()
+            log?.verbose("Live resize \(newValue ? "started" : "ended")")
         }
     }
 
@@ -369,6 +443,7 @@ class MetalLayer: CAMetalLayer {
             requestedWantsEDR = false
             super.pixelFormat = .rgba16Float
         }
+        contentsGravity = .resizeAspect
         backgroundColor = NSColor.black.cgColor
         logState(property: "pixel format")
     }
@@ -379,6 +454,8 @@ class MetalLayer: CAMetalLayer {
             fatalError("init(layer: Any) passed an invalid layer")
         }
         common = oldLayer.common
+        previousContentsGravity = oldLayer.previousContentsGravity
+        liveResizeGravity = oldLayer.liveResizeGravity
         (hdrActiveWanted, hdrIsHLG, hdrMinLuma, hdrMaxLuma,
          requestedWantsEDR, requestedColorspace, requestedPixelFormat,
          cachedEDRKey, cachedEDRMetadata, isInvalidated) = oldLayer.hdrLock.withLock {
@@ -387,6 +464,8 @@ class MetalLayer: CAMetalLayer {
              oldLayer.cachedEDRKey, oldLayer.cachedEDRMetadata, oldLayer.isInvalidated)
         }
         super.init()
+        contentsGravity = oldLayer.contentsGravity
+        backgroundColor = oldLayer.backgroundColor
     }
 
     required init?(coder: NSCoder) {

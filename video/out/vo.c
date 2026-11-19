@@ -1130,6 +1130,7 @@ static MP_THREAD_VOID vo_thread(void *ptr)
     struct vo *vo = ptr;
     struct vo_internal *in = vo->in;
     bool vo_paused = false;
+    bool vo_live_resize = false;
 
     mp_thread_set_name("vo");
 
@@ -1153,6 +1154,17 @@ static MP_THREAD_VOID vo_thread(void *ptr)
             break;
         stats_event(in->stats, "iterations");
         vo->driver->control(vo, VOCTRL_CHECK_EVENTS, NULL);
+        if (vo->live_resize != vo_live_resize) {
+            vo_live_resize = vo->live_resize;
+            mp_mutex_lock(&in->lock);
+            reset_vsync_timings(vo);
+            in->num_total_vsync_samples = 0;
+            in->num_vsync_samples = 0;
+            if (in->nominal_vsync_interval > 0)
+                in->vsync_interval = MPMAX(in->nominal_vsync_interval, 1);
+            mp_mutex_unlock(&in->lock);
+            wakeup_core(vo);
+        }
         bool working = render_frame(vo);
         int64_t now = mp_time_ns();
         int64_t wait_until = now + MP_TIME_S_TO_NS(working ? 0 : 1000);
@@ -1162,6 +1174,9 @@ static MP_THREAD_VOID vo_thread(void *ptr)
 
         mp_mutex_lock(&in->lock);
         int64_t max_interval = in->vsync_interval > 1 ? in->vsync_interval : 0;
+        int64_t redraw_interval = vo_live_resize && in->nominal_vsync_interval > 1
+            ? MPMIN(max_interval, (int64_t)(in->nominal_vsync_interval / 2))
+            : max_interval;
         if (in->wakeup_pts) {
             if (in->wakeup_pts > now) {
                 wait_until = MPMIN(wait_until, in->wakeup_pts);
@@ -1174,6 +1189,8 @@ static MP_THREAD_VOID vo_thread(void *ptr)
         int64_t wakeup_pts = in->wakeup_pts;
         if (vo->want_redraw) {
             in->want_redraw = true;
+            if (vo_live_resize)
+                in->request_redraw = true;
             wakeup_core(vo);
         }
         if ((!working && !in->rendering && !in->frame_queued) && in->wakeup_on_done) {
@@ -1202,17 +1219,17 @@ static MP_THREAD_VOID vo_thread(void *ptr)
                 wait_vo(vo, now + MP_TIME_MS_TO_NS(6));
                 continue;
             }
-            if (wakeup_pts > 0 && wait_until <= now + max_interval / 2) {
+            if (wakeup_pts > 0 && wait_until <= now + redraw_interval / 2) {
                 wait_vo(vo, wait_until);
                 continue;
             }
             // Some windowing platforms break if we submit frames too fast.
-            if (vo->previous_redraw_time + max_interval <= now) {
+            if (vo->previous_redraw_time + redraw_interval <= now) {
                 vo->driver->control(vo, VOCTRL_REDRAW, NULL);
                 do_redraw(vo); // now is a good time
                 vo->previous_redraw_time = mp_time_ns();
             } else {
-                wait_vo(vo, MPMIN(wait_until, vo->previous_redraw_time + max_interval));
+                wait_vo(vo, MPMIN(wait_until, vo->previous_redraw_time + redraw_interval));
             }
             continue;
         }
