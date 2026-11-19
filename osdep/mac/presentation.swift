@@ -15,6 +15,8 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+import Foundation
+
 extension Presentation {
     struct Time {
         let cvTime: CVTimeStamp
@@ -33,6 +35,7 @@ extension Presentation {
 
 class Presentation {
     unowned var common: Common
+    private let lock = NSLock()
     var times: [Time] = []
     static let nanoPerSecond: Double = 1e+9
 
@@ -41,16 +44,33 @@ class Presentation {
     }
 
     func add(time: CVTimeStamp) {
-        times.append(Time(time))
+        lock.withLock {
+            if times.count > 16 {
+                let now = mp_time_ns()
+                times.removeAll(where: { $0.time <= now })
+                if times.count > 32 {
+                    times.removeFirst(times.count - 32)
+                }
+            }
+            times.append(Time(time))
+        }
     }
 
     func next() -> Time? {
-        let now = mp_time_ns()
-        let count = times.count
-        times.removeAll(where: { $0.time <= now })
-        var time = times.first
-        time?.skipped = Int64(max(count - times.count - 1, 0))
+        return lock.withLock {
+            let now = mp_time_ns()
+            let count = times.count
+            times.removeAll(where: { $0.time <= now })
+            var time = times.first
+            time?.skipped = Int64(max(count - times.count - 1, 0))
 
-        return time
+            return time
+        }
+    }
+
+    func reset() {
+        lock.withLock {
+            times.removeAll()
+        }
     }
 }

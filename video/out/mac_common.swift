@@ -23,6 +23,7 @@ class MacCommon: Common {
     var presentation: Presentation?
     var timer: PreciseTimer?
     var swapTime: UInt64 = 0
+    var swapQuitting: Bool = false
     let swapLock: NSCondition = NSCondition()
 
     @objc init(_ vo: UnsafeMutablePointer<vo>) {
@@ -76,9 +77,38 @@ class MacCommon: Common {
         return true
     }
 
+    @objc func prepareUninit() {
+        swapLock.lock()
+        swapQuitting = true
+        swapTime += 1
+        swapLock.broadcast()
+        swapLock.unlock()
+        if Thread.isMainThread {
+            prepareForQuit()
+            CATransaction.flush()
+        } else {
+            DispatchQueue.main.sync {
+                self.prepareForQuit()
+                CATransaction.flush()
+            }
+        }
+        window?.waitForAnimation()
+    }
+
+    override func prepareForQuit() {
+        layer?.disableDisplaySyncForQuit()
+        swapLock.lock()
+        swapQuitting = true
+        swapTime += 1
+        swapLock.broadcast()
+        swapLock.unlock()
+        super.prepareForQuit()
+    }
+
     @objc func uninit(_ vo: UnsafeMutablePointer<vo>) {
         window?.waitForAnimation()
 
+        stopDisplaylink()
         timer?.terminate()
 
         DispatchQueue.main.sync {
@@ -92,7 +122,7 @@ class MacCommon: Common {
     @objc func swapBuffer() {
         if option.mac.macos_render_timer > RENDER_TIMER_SYSTEM {
             swapLock.lock()
-            while swapTime < 1 {
+            while swapTime < 1 && !swapQuitting {
                 swapLock.wait()
             }
             swapTime = 0
@@ -110,6 +140,10 @@ class MacCommon: Common {
     }
 
     @objc func isVisible() -> Bool {
+        swapLock.lock()
+        let quitting = swapQuitting
+        swapLock.unlock()
+        if quitting { return false }
         return window?.occlusionState.contains(.visible) ?? false ||
                option.vo.force_render ||
                needsInitialDraw
@@ -119,7 +153,7 @@ class MacCommon: Common {
         layer?.wantsAlpha = alpha
         DispatchQueue.main.sync {
             window?.isOpaque = !alpha
-            window?.backgroundColor = alpha ? NSColor.clear : nil
+            window?.backgroundColor = alpha ? NSColor.clear : NSColor.black
         }
     }
 

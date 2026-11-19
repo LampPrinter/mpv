@@ -44,6 +44,7 @@ class Common: NSObject {
 
     var cursorVisibilityWanted: Bool = true
     var needsInitialDraw: Bool = true
+    var isQuitting: Bool = false
 
     var title: String = "mpv" {
         didSet { if let window = window { window.title = title } }
@@ -139,6 +140,22 @@ class Common: NSObject {
         if option.vo.fullscreen {
             DispatchQueue.main.async {
                 self.window?.toggleFullScreen(nil)
+            }
+        }
+    }
+
+    func prepareForQuit() {
+        if isQuitting { return }
+        isQuitting = true
+        setCursorVisibility(true)
+        enableDisplaySleep()
+        if let win = window {
+            if win.isAnimating {
+                win.endAnimation()
+            }
+            if !win.styleMask.contains(.fullScreen) {
+                NSApp.presentationOptions = []
+                win.orderOut(nil)
             }
         }
     }

@@ -39,6 +39,7 @@ class AppHub: NSObject {
     var isApplication: Bool { return NSApp is Application }
     var isBundle: Bool { return ProcessInfo.processInfo.environment["MPVBUNDLE"] == "true" }
     var openEvents: Int = 0
+    private var isQuitting: Bool = false
 
     private override init() {
         input = InputHelper()
@@ -102,6 +103,31 @@ class AppHub: NSObject {
         log.verbose("Stopping RemoteCommandCenter")
         remote?.stop()
 #endif
+    }
+
+    @objc func prepareForQuit() {
+        guard NSApp != nil else { return }
+        let work = {
+            guard let app = NSApp, !self.isQuitting else { return }
+            self.isQuitting = true
+            NSCursor.setHiddenUntilMouseMoves(false)
+            for w in app.windows {
+                if let win = w as? Window {
+                    win.common.prepareForQuit()
+                } else {
+                    w.orderOut(nil)
+                }
+            }
+            if self.isApplication && (app.isActive || !app.windows.isEmpty) {
+                app.hide(nil)
+            }
+            CATransaction.flush()
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
     }
 
     func open(urls: [URL]) {

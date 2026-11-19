@@ -35,6 +35,7 @@ class PreciseTimer {
     let condition = NSCondition()
     var events: [Timing] = []
     var isRunning: Bool = true
+    var isTerminated: Bool = false
     var isHighPrecision: Bool = false
 
     var thread: pthread_t!
@@ -90,7 +91,13 @@ class PreciseTimer {
 
     func terminate() {
         condition.lock()
+        if isTerminated {
+            condition.unlock()
+            return
+        }
+        isTerminated = true
         isRunning = false
+        events.removeAll()
         condition.signal()
         condition.unlock()
         pthread_kill(thread, SIGALRM)
@@ -99,6 +106,10 @@ class PreciseTimer {
 
     func scheduleAt(time: UInt64, closure: @escaping () -> Void) {
         condition.lock()
+        guard isRunning && !isTerminated else {
+            condition.unlock()
+            return
+        }
         let firstEventTime = events.first?.time ?? 0
         let lastEventTime = events.last?.time ?? 0
         events.append(Timing(time: time, closure: closure))
@@ -108,11 +119,10 @@ class PreciseTimer {
         }
 
         condition.signal()
-        condition.unlock()
-
         if firstEventTime > time {
             pthread_kill(thread, SIGALRM)
         }
+        condition.unlock()
     }
 
     let threadSignal: @convention(c) (Int32) -> Void = { (_ sig: Int32) in }
@@ -132,9 +142,13 @@ class PreciseTimer {
                 condition.wait()
             }
 
-            if !isRunning { break }
+            if !isRunning {
+                condition.unlock()
+                break
+            }
 
             guard let event = events.first else {
+                condition.unlock()
                 continue
             }
             condition.unlock()

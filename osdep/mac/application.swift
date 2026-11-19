@@ -69,6 +69,7 @@ class Application: NSApplication, NSApplicationDelegate {
 
     // quit from App icon, external quit from NSWorkspace
     @objc func handleQuit(event: NSAppleEventDescriptor?, replyEvent: NSAppleEventDescriptor?) {
+        appHub.prepareForQuit()
         // send quit to core, terminates mpv_main called in playbackThread,
         if !appHub.input.command("quit") {
             appHub.log.warning("Could not properly shut down mpv")

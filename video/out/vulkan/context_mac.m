@@ -33,6 +33,7 @@ static void mac_vk_uninit(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
 
+    [p->vo_mac prepareUninit];
     ra_vk_ctx_uninit(ctx);
     mpvk_uninit(&p->vk);
     [p->vo_mac uninit:ctx->vo];

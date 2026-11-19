@@ -354,6 +354,9 @@ class MenuBar: NSObject, EventSubscriber {
 
     @objc func command(_ menuItem: MenuItem) {
         guard let menuConfig = menuItem.config else { return }
+        if menuConfig.command == "quit" || menuConfig.command == "quit-watch-later" {
+            appHub.prepareForQuit()
+        }
         appHub.input.command(menuConfig.command)
     }
 

@@ -172,6 +172,16 @@ class TitleBar: NSVisualEffectView {
             isHidden = true
             return
         }
+        if duration <= 0.0 {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            systemBar?.alphaValue = 0
+            alphaValue = 0
+            buttons.forEach { $0.isHidden = true }
+            isHidden = true
+            CATransaction.commit()
+            return
+        }
         NSAnimationContext.runAnimationGroup({ (context) in
             context.duration = duration
             systemBar?.animator().alphaValue = 0

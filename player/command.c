@@ -90,6 +90,10 @@
 #include <windows.h>
 #endif
 
+#if HAVE_COCOA
+#include "osdep/mac/app_bridge.h"
+#endif
+
 struct command_ctx {
     // All properties, sorted by name.
     struct m_property_list properties;
@@ -6438,6 +6442,9 @@ static void cmd_quit(void *p)
     mpctx->stop_play = PT_QUIT;
     mpctx->quit_custom_rc = cmd->args[0].v.i;
     mpctx->has_quit_custom_rc = true;
+#if HAVE_COCOA
+    cocoa_prepare_quit();
+#endif
     mp_wakeup_core(mpctx);
 }
 
@@ -7497,6 +7504,9 @@ static void cmd_apply_profile(void *p)
 {
     struct mp_cmd_ctx *cmd = p;
     struct MPContext *mpctx = cmd->mpctx;
+
+    if (mpctx->stop_play == PT_QUIT)
+        return;
 
     char *profile = cmd->args[0].v.s;
     int mode = cmd->args[1].v.i;

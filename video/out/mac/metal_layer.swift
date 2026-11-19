@@ -19,8 +19,8 @@ import Cocoa
 import QuartzCore
 
 class MetalLayer: CAMetalLayer {
-    unowned var common: MacCommon
-    var log: LogHelper { return common.log }
+    weak var common: MacCommon?
+    var log: LogHelper? { return common?.log }
 
     // workaround for a MoltenVK workaround that sets the drawableSize to 1x1 to forcefully complete
     // the presentation, this causes flicker and the drawableSize possibly staying at 1x1
@@ -64,6 +64,15 @@ class MetalLayer: CAMetalLayer {
         didSet {
             if displaySyncEnabled != oldValue { logState(property: "display sync") }
         }
+    }
+
+    func disableDisplaySyncForQuit() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if super.displaySyncEnabled {
+            super.displaySyncEnabled = false
+        }
+        CATransaction.commit()
     }
 
     // workaround for MoltenVK problem setting this to false even when no transparent content is rendered
@@ -111,7 +120,7 @@ class MetalLayer: CAMetalLayer {
         ]
         let dtdPossible = isOpaque && dtdPixelFormats.contains(pixelFormat)
 
-        log.verbose("""
+        log?.verbose("""
         Metal layer state changed (\(property))
         Pixel Format: \(pixelFormat.name) - Opaque: \(isOpaque) \(opaqueForced ? "(forced)" : "")
         Colorspace: \(colorspace?.longName ?? "nil")

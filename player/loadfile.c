@@ -2151,7 +2151,7 @@ terminate_playback:
                      current && current->reloading;
     if (current)
         current->reloading = false;
-    if (!reloading)
+    if (!reloading && mpctx->stop_play != PT_QUIT)
         m_config_restore_backups(mpctx->mconfig);
 
     TA_FREEP(&mpctx->filter_root);
