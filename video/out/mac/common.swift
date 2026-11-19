@@ -44,6 +44,13 @@ class Common: NSObject {
 
     var cursorVisibilityWanted: Bool = true
     var needsInitialDraw: Bool = true
+
+    let edrLock = NSLock()
+    var cachedMaxEDR: Float = 1.0
+    var lastNotifiedMaxEDR: Float = 1.0
+    var cachedMaxPotentialEDR: Float = 1.0
+    var cachedMaxRefEDR: Float = 0.0
+    var edrDebounceWorkItem: DispatchWorkItem?
     var isQuitting: Bool = false
 
     var title: String = "mpv" {
@@ -119,6 +126,7 @@ class Common: NSObject {
         if option.vo.focus_on == 0 {
             previousActiveApp?.activate()
         }
+        _ = updateEDRState()
     }
 
     func initView(_ vo: UnsafeMutablePointer<vo>, _ layer: CALayer) {
@@ -147,6 +155,7 @@ class Common: NSObject {
     func prepareForQuit() {
         if isQuitting { return }
         isQuitting = true
+        cancelEDRDebounce()
         setCursorVisibility(true)
         enableDisplaySleep()
         if let win = window {
@@ -162,6 +171,7 @@ class Common: NSObject {
 
     func uninitCommon() {
         eventsLock.withLock { self.vo = nil }
+        cancelEDRDebounce()
         setCursorVisibility(true)
         stopDisplaylink()
         uninitLightSensor()
@@ -360,6 +370,95 @@ class Common: NSObject {
             queue: .main,
             using: { [weak self] (_) in self?.appDidResignActive() }
         ))
+        appNotificationObservers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main,
+            using: { [weak self] (_) in
+                self?.handleScreenParametersChanged()
+            }
+        ))
+    }
+
+    func cancelEDRDebounce() {
+        let pending = edrLock.withLock { () -> DispatchWorkItem? in
+            let item = edrDebounceWorkItem
+            edrDebounceWorkItem = nil
+            return item
+        }
+        pending?.cancel()
+    }
+
+    func handleScreenParametersChanged() {
+        if isQuitting { return }
+        let screen = window?.screen ?? getTargetScreen(forFullscreen: false) ?? NSScreen.main
+        let maxEDR = Float(screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
+        let maxPotEDR = Float(screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0)
+        let maxRefEDR = Float(screen?.maximumReferenceExtendedDynamicRangeColorComponentValue ?? 0.0)
+        let capsChanged: Bool = edrLock.withLock {
+            let changed = abs(cachedMaxPotentialEDR - maxPotEDR) > 0.01 ||
+                          abs(cachedMaxRefEDR - maxRefEDR) > 0.01
+            cachedMaxEDR = maxEDR
+            cachedMaxPotentialEDR = maxPotEDR
+            cachedMaxRefEDR = maxRefEDR
+            if changed {
+                lastNotifiedMaxEDR = maxEDR
+            }
+            return changed
+        }
+        if capsChanged {
+            cancelEDRDebounce()
+            log.verbose("EDR state updated: current=\(maxEDR) potential=\(maxPotEDR) ref=\(maxRefEDR)")
+            flagEvents(VO_EVENT_WIN_STATE | VO_EVENT_EXPOSE)
+            return
+        }
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self, !self.isQuitting else { return }
+            self.edrLock.withLock {
+                self.edrDebounceWorkItem = nil
+            }
+            let ev = self.updateEDRState()
+            if ev != 0 {
+                self.flagEvents(ev)
+            }
+        }
+        let prev = edrLock.withLock { () -> DispatchWorkItem? in
+            let old = edrDebounceWorkItem
+            edrDebounceWorkItem = item
+            return old
+        }
+        prev?.cancel()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: item)
+    }
+
+    func updateEDRState() -> Int {
+        if isQuitting { return 0 }
+        let screen = window?.screen ?? getTargetScreen(forFullscreen: false) ?? NSScreen.main
+        let maxEDR = Float(screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
+        let maxPotEDR = Float(screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0)
+        let maxRefEDR = Float(screen?.maximumReferenceExtendedDynamicRangeColorComponentValue ?? 0.0)
+        let ev: Int = edrLock.withLock {
+            let capsChanged = abs(cachedMaxPotentialEDR - maxPotEDR) > 0.01 ||
+                              abs(cachedMaxRefEDR - maxRefEDR) > 0.01
+            let headroomChanged = abs(lastNotifiedMaxEDR - maxEDR) > 0.15
+            cachedMaxEDR = maxEDR
+            cachedMaxPotentialEDR = maxPotEDR
+            cachedMaxRefEDR = maxRefEDR
+            if capsChanged || headroomChanged {
+                lastNotifiedMaxEDR = maxEDR
+            }
+            if capsChanged {
+                return VO_EVENT_WIN_STATE | VO_EVENT_EXPOSE
+            } else if headroomChanged {
+                return VO_EVENT_EXPOSE
+            }
+            return 0
+        }
+        if ev != 0 {
+            log.verbose("EDR state updated: current=\(maxEDR) potential=\(maxPotEDR) ref=\(maxRefEDR)")
+        }
+        return ev
     }
 
     func removeAppNotifications() {

@@ -21,8 +21,11 @@
 #include <time.h>
 
 #include <libplacebo/colorspace.h>
+#include <libplacebo/dispatch.h>
 #include <libplacebo/options.h>
 #include <libplacebo/renderer.h>
+#include <libplacebo/shaders/colorspace.h>
+#include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/lut.h>
 #include <libplacebo/shaders/icc.h>
 #include <libplacebo/utils/libav.h>
@@ -50,6 +53,7 @@
 #include "video/out/gpu/video.h"
 #include "video/out/gpu/video_shaders.h"
 #include "sub/osd.h"
+#include "sub/osd_state.h"
 
 
 struct osd_entry {
@@ -65,6 +69,7 @@ struct overlay_state {
     struct osd_entry entries[MAX_OSD_PARTS];
     struct pl_overlay *overlays;
     int num_overlays;
+    float last_ref_luma;
 };
 
 struct scaler_params {
@@ -156,6 +161,23 @@ struct mppl_video {
     struct mp_csp_equalizer_state *video_eq;
     struct scaler_params scalers[SCALER_COUNT];
     const struct pl_hook **hooks; // storage for `params.hooks`
+    const struct pl_hook **edr_hooks; // per-frame storage with internal EDR hooks
+#if HAVE_COCOA
+    struct {
+        float peak_nits;
+        float peak_edr;
+        float knee;
+        float hr;
+        bool ref_mode;
+        bool active;
+    } mac_edr;
+    struct pl_hook mac_edr_hook_inst;
+    float last_sub_ref_luma;
+    pl_renderer edr_osd_rr;
+    pl_dispatch edr_osd_dp;
+    pl_tex edr_video_tex;
+    pl_tex edr_osd_tex;
+#endif
     enum pl_color_levels output_levels;
 
     struct pl_icc_params icc_params;
@@ -418,11 +440,23 @@ static void dup_stereo_parts(struct mppl_video *p, struct osd_entry *entry, int 
     }
 }
 
+static float get_ref_luma(struct mppl_video *p);
+
+#if HAVE_COCOA
+static bool is_macvk_edr(const struct mppl_video *p, const struct pl_color_space *csp);
+static float mac_edr_adjust_sub_peak(struct mppl_video *p, float base_peak_100,
+                                     enum pl_overlay_coords coords,
+                                     const struct pl_color_space *frame_csp);
+#endif
+
 static struct pl_color_space bgra_overlay_color(struct mppl_video *p,
                                                 const struct sub_bitmaps *item,
                                                 const struct sub_bitmap *b,
                                                 const struct mp_image *src,
-                                                float ref_luma)
+                                                float ref_luma,
+                                                enum pl_overlay_coords coords,
+                                                const struct pl_color_space *frame_csp,
+                                                bool edr_hook_active)
 {
     struct pl_color_space color = pl_color_space_srgb;
 
@@ -446,8 +480,14 @@ static struct pl_color_space bgra_overlay_color(struct mppl_video *p,
                         .max_luma = max,
                     };
                 } else if (p->next_opts->image_subs_hdr_peak != -1) {
+                    float sub_peak = p->next_opts->image_subs_hdr_peak;
+#if HAVE_COCOA
+                    if (edr_hook_active && sub_peak > 0.0f) {
+                        sub_peak = mac_edr_adjust_sub_peak(p, sub_peak, coords, frame_csp);
+                    }
+#endif
                     color.hdr = (struct pl_hdr_metadata) {
-                        .max_luma = p->next_opts->image_subs_hdr_peak,
+                        .max_luma = sub_peak,
                     };
                 }
             }
@@ -477,17 +517,28 @@ static struct pl_color_space bgra_overlay_color(struct mppl_video *p,
 static struct pl_color_space libass_overlay_color(struct mppl_video *p,
                                                   const struct sub_bitmaps *item,
                                                   const struct mp_image *src,
-                                                  float ref_luma)
+                                                  float ref_luma,
+                                                  enum pl_overlay_coords coords,
+                                                  const struct pl_color_space *frame_csp,
+                                                  bool edr_hook_active)
 {
     struct pl_color_space color = pl_color_space_srgb;
+    bool is_sub = item->render_index == OSDTYPE_SUB ||
+                  item->render_index == OSDTYPE_SUB2;
 
     if (src && item->video_color_space && !pl_color_transfer_is_hdr(src->params.color.transfer))
         color = src->params.color;
-    if (src && pl_color_transfer_is_hdr(src->params.color.transfer) &&
+    if (is_sub && src && pl_color_transfer_is_hdr(src->params.color.transfer) &&
         p->next_opts->sub_hdr_peak)
     {
+        float sub_peak = p->next_opts->sub_hdr_peak;
+#if HAVE_COCOA
+        if (edr_hook_active && sub_peak > 0.0f) {
+            sub_peak = mac_edr_adjust_sub_peak(p, sub_peak, coords, frame_csp);
+        }
+#endif
         color.hdr = (struct pl_hdr_metadata) {
-            .max_luma = p->next_opts->sub_hdr_peak,
+            .max_luma = sub_peak,
         };
     } else if (ref_luma && !pl_color_transfer_is_hdr(color.transfer)) {
         color.hdr.max_luma = ref_luma;
@@ -524,10 +575,460 @@ static void add_run_overlay(struct mppl_video *p, struct overlay_state *state,
     }
 }
 
+#if HAVE_COCOA
+static bool is_macvk_edr(const struct mppl_video *p, const struct pl_color_space *csp)
+{
+    return p->ra_ctx && p->ra_ctx->fns &&
+           strcmp(p->ra_ctx->fns->name, "macvk") == 0 &&
+           (csp->transfer == PL_COLOR_TRC_PQ || csp->transfer == PL_COLOR_TRC_LINEAR) &&
+           csp->hdr.max_luma > PL_COLOR_SDR_WHITE;
+}
+
+// Compute pre-mac_edr_hook luminance (in nits) so blended source-frame overlays
+// land at exact target_nits after mac_edr_hook runs.
+static float mac_edr_inverse_ootf_nits(float target_nits, float peak_nits,
+                                       bool ref_mode, bool is_hlg,
+                                       float orig_max_nits)
+{
+    if (target_nits <= 0.0f)
+        return 0.0f;
+
+    float max_nits = MPMAX(peak_nits, PL_COLOR_SDR_WHITE);
+    float peak_edr = MPMAX(max_nits / PL_COLOR_SDR_WHITE, 1.5f);
+    float y = target_nits / PL_COLOR_SDR_WHITE;
+
+    if (ref_mode) {
+        bool need_rolloff = orig_max_nits > max_nits + 1.0f;
+        float mx = y;
+        if (need_rolloff) {
+            float knee = MPMIN(2.46305f, peak_edr * 0.5f);
+            if (y > knee) {
+                float hr = MPMAX(peak_edr - knee, 0.25f);
+                float dy = MPMIN(y - knee, hr * 0.98f);
+                mx = knee + (dy * hr) / (hr - dy);
+            }
+        }
+        return mx * PL_COLOR_SDR_WHITE;
+    }
+
+    float knee = MPMIN(1.0f, peak_edr * 0.5f);
+    bool need_rolloff = !is_hlg || max_nits < 1020.0f;
+    float mx = y;
+    if (need_rolloff && y > knee) {
+        float hr = MPMAX(peak_edr - knee, 0.5f);
+        float dy = MPMIN(y - knee, hr * 0.98f);
+        mx = knee + (dy * hr) / (hr - dy);
+    }
+
+    if (is_hlg)
+        return mx * (PL_COLOR_SDR_WHITE * PL_COLOR_SDR_WHITE / 206.0f);
+
+    return 100.0f * powf(MPMAX(mx * (PL_COLOR_SDR_WHITE / 206.0f), 1e-8f),
+                         1.0f / 1.045f);
+}
+
+static float mac_edr_adjust_sub_peak(struct mppl_video *p, float base_peak_100,
+                                     enum pl_overlay_coords coords,
+                                     const struct pl_color_space *frame_csp)
+{
+    float ui_ref = get_ref_luma(p);
+    float desired = ui_ref > 0.0f ? base_peak_100 * (ui_ref / 100.0f) : base_peak_100;
+    if (coords == PL_OVERLAY_COORDS_DST_FRAME)
+        return desired;
+
+    bool is_hlg = frame_csp && frame_csp->transfer == PL_COLOR_TRC_HLG;
+    float orig_max = 0.0f;
+    if (frame_csp) {
+        pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
+            .color    = frame_csp,
+            .metadata = PL_HDR_METADATA_ANY,
+            .scaling  = PL_HDR_NITS,
+            .out_max  = &orig_max,
+        ));
+    }
+    return mac_edr_inverse_ootf_nits(desired, p->mac_edr.peak_nits,
+                                     p->mac_edr.ref_mode, is_hlg, orig_max);
+}
+
+static struct pl_hook_res mac_edr_hook_fn(void *priv, const struct pl_hook_params *params)
+{
+    struct mppl_video *p = priv;
+    float max_nits = MPMAX(p ? p->mac_edr.peak_nits : params->color.hdr.max_luma,
+                           PL_COLOR_SDR_WHITE);
+    float peak_edr = MPMAX(max_nits / PL_COLOR_SDR_WHITE, 1.5f);
+    bool ref_mode = p && p->mac_edr.ref_mode;
+    bool is_hlg = params->orig_color &&
+                  params->orig_color->transfer == PL_COLOR_TRC_HLG;
+    float orig_max = 0.0f;
+    if (params->orig_color) {
+        pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
+            .color    = params->orig_color,
+            .metadata = PL_HDR_METADATA_ANY,
+            .scaling  = PL_HDR_NITS,
+            .out_max  = &orig_max,
+        ));
+    }
+
+    float knee, hr;
+    if (ref_mode) {
+        bool need_rolloff = orig_max > max_nits + 1.0f;
+        knee = need_rolloff ? MPMIN(2.46305f, peak_edr * 0.5f) : 1e9f;
+        hr = need_rolloff ? MPMAX(peak_edr - knee, 0.25f) : 1.0f;
+    } else if (is_hlg) {
+        bool need_rolloff = max_nits < 1020.0f;
+        knee = need_rolloff ? MPMIN(1.0f, peak_edr * 0.5f) : 1e9f;
+        hr = need_rolloff ? MPMAX(peak_edr - knee, 0.5f) : 1.0f;
+    } else {
+        knee = MPMIN(1.0f, peak_edr * 0.5f);
+        hr = MPMAX(peak_edr - knee, 0.5f);
+    }
+
+    if (p) {
+        p->mac_edr.peak_edr = peak_edr;
+        p->mac_edr.knee = knee;
+        p->mac_edr.hr = hr;
+    }
+
+    const struct pl_shader_var vars[3] = {
+        {
+            .var = pl_var_float("edr_peak"),
+            .data = p ? &p->mac_edr.peak_edr : &peak_edr,
+            .dynamic = true,
+        },
+        {
+            .var = pl_var_float("edr_knee"),
+            .data = p ? &p->mac_edr.knee : &knee,
+            .dynamic = true,
+        },
+        {
+            .var = pl_var_float("edr_hr"),
+            .data = p ? &p->mac_edr.hr : &hr,
+            .dynamic = true,
+        },
+    };
+
+    pl_shader_linearize(params->sh, &params->color);
+
+    static const char ref_body[] =
+        "{\n"
+        "    vec3 ootf = max(color.rgb, vec3(0.0));\n"
+        "    float mx = max(ootf.r, max(ootf.g, ootf.b));\n"
+        "    if (mx > edr_knee) {\n"
+        "        float ex = mx - edr_knee;\n"
+        "        float mx_new = edr_knee + (ex * edr_hr) / (ex + edr_hr);\n"
+        "        ootf *= mx_new / mx;\n"
+        "    }\n"
+        "    color.rgb = clamp(ootf, vec3(0.0), vec3(edr_peak));\n"
+        "}\n";
+
+    static const char hlg_body[] =
+        "{\n"
+        "    vec3 ootf = max(color.rgb, vec3(0.0)) * (206.0 / 203.0);\n"
+        "    float mx = max(ootf.r, max(ootf.g, ootf.b));\n"
+        "    if (mx > edr_knee) {\n"
+        "        float ex = mx - edr_knee;\n"
+        "        float mx_new = edr_knee + (ex * edr_hr) / (ex + edr_hr);\n"
+        "        ootf *= mx_new / mx;\n"
+        "    }\n"
+        "    color.rgb = clamp(ootf, vec3(0.0), vec3(edr_peak));\n"
+        "}\n";
+
+    static const char pq_body[] =
+        "{\n"
+        "    vec3 c = max(color.rgb, vec3(0.0));\n"
+        "    vec3 x = max(c * (203.0 / 100.0), vec3(1e-8));\n"
+        "    vec3 ootf = (206.0 / 203.0) * pow(x, vec3(1.045)) * step(vec3(1e-8), c);\n"
+        "    float mx = max(ootf.r, max(ootf.g, ootf.b));\n"
+        "    if (mx > edr_knee) {\n"
+        "        float ex = mx - edr_knee;\n"
+        "        float mx_new = edr_knee + (ex * edr_hr) / (ex + edr_hr);\n"
+        "        ootf *= mx_new / mx;\n"
+        "    }\n"
+        "    color.rgb = clamp(ootf, vec3(0.0), vec3(edr_peak));\n"
+        "}\n";
+
+    int out_w = 0, out_h = 0;
+    if (!pl_shader_output_size(params->sh, &out_w, &out_h)) {
+        out_w = abs(pl_rect_w(params->dst_rect));
+        out_h = abs(pl_rect_h(params->dst_rect));
+        if (out_w <= 0 || out_h <= 0) {
+            out_w = (int)roundf(fabsf(pl_rect_w(params->rect)));
+            out_h = (int)roundf(fabsf(pl_rect_h(params->rect)));
+        }
+    }
+
+    if (!pl_shader_custom(params->sh, &(struct pl_custom_shader) {
+            .description = "macOS EDR Infuse OOTF",
+            .body = ref_mode ? ref_body : (is_hlg ? hlg_body : pq_body),
+            .input = PL_SHADER_SIG_COLOR,
+            .output = PL_SHADER_SIG_COLOR,
+            .variables = vars,
+            .num_variables = MP_ARRAY_SIZE(vars),
+            .output_w = out_w,
+            .output_h = out_h,
+        }))
+    {
+        return (struct pl_hook_res) { .failed = true };
+    }
+
+    pl_shader_delinearize(params->sh, &params->color);
+
+    return (struct pl_hook_res) {
+        .output = PL_HOOK_SIG_COLOR,
+        .sh = params->sh,
+        .repr = params->repr,
+        .color = params->color,
+        .components = params->components,
+        .rect = params->rect,
+    };
+}
+
+// Composite OSD overlays in extended Gamma 2.2 (normalized to ui_ref) over
+// rendered PQ video so translucent dark shadows attenuate subtitles and video
+// perceptually identically to SDR without clipping HDR highlights.
+static bool mac_edr_render_srgb_osd(struct mppl_video *p,
+                                    const struct pl_frame_mix *mix,
+                                    const struct pl_frame *render_target,
+                                    const struct pl_render_params *params,
+                                    pl_tex dst_fbo, bool dst_flipped,
+                                    float ref_luma)
+{
+    pl_gpu gpu = p->gpu;
+    int dst_w = dst_fbo->params.w;
+    int dst_h = dst_fbo->params.h;
+    if (dst_w <= 0 || dst_h <= 0)
+        return false;
+
+    pl_fmt vid_fmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 10, 0,
+                                 PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE |
+                                 PL_FMT_CAP_BLITTABLE);
+    if (!vid_fmt) {
+        vid_fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16,
+                              PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE |
+                              PL_FMT_CAP_BLITTABLE);
+    }
+    pl_fmt osd_fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16,
+                                 PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_BLENDABLE |
+                                 PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_BLITTABLE);
+    if (!osd_fmt) {
+        osd_fmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+                              PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_BLENDABLE |
+                              PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_BLITTABLE);
+    }
+    if (!vid_fmt || !osd_fmt)
+        return false;
+
+    int q_w = MP_ALIGN_UP(dst_w, 256);
+    int q_h = MP_ALIGN_UP(dst_h, 256);
+    int cur_w = p->edr_video_tex ? p->edr_video_tex->params.w : 0;
+    int cur_h = p->edr_video_tex ? p->edr_video_tex->params.h : 0;
+    int tex_w = MPMAX(q_w, cur_w);
+    int tex_h = MPMAX(q_h, cur_h);
+
+    if (!p->edr_video_tex || p->edr_video_tex->params.w < dst_w ||
+        p->edr_video_tex->params.h < dst_h ||
+        p->edr_video_tex->params.format != vid_fmt ||
+        p->edr_video_tex->params.w != tex_w || p->edr_video_tex->params.h != tex_h)
+    {
+        if (!pl_tex_recreate(gpu, &p->edr_video_tex, pl_tex_params(
+                .w = tex_w,
+                .h = tex_h,
+                .format = vid_fmt,
+                .sampleable = true,
+                .renderable = true,
+                .storable = !!(vid_fmt->caps & PL_FMT_CAP_STORABLE),
+                .blit_src = true,
+                .blit_dst = true,
+            )))
+        {
+            return false;
+        }
+    }
+
+    if (!p->edr_osd_tex || p->edr_osd_tex->params.w != tex_w ||
+        p->edr_osd_tex->params.h != tex_h ||
+        p->edr_osd_tex->params.format != osd_fmt)
+    {
+        if (!pl_tex_recreate(gpu, &p->edr_osd_tex, pl_tex_params(
+                .w = tex_w,
+                .h = tex_h,
+                .format = osd_fmt,
+                .sampleable = true,
+                .renderable = true,
+                .storable = !!(osd_fmt->caps & PL_FMT_CAP_STORABLE),
+                .blit_dst = true,
+            )))
+        {
+            return false;
+        }
+    }
+
+    if (!p->edr_osd_rr) {
+        p->edr_osd_rr = pl_renderer_create(p->pllog, gpu);
+        if (!p->edr_osd_rr)
+            return false;
+    }
+    if (!p->edr_osd_dp) {
+        p->edr_osd_dp = pl_dispatch_create(p->pllog, gpu);
+        if (!p->edr_osd_dp)
+            return false;
+    }
+
+    struct pl_frame vid_target = *render_target;
+    vid_target.planes[0] = (struct pl_plane) {
+        .texture = p->edr_video_tex,
+        .components = 4,
+        .component_mapping = {0, 1, 2, 3},
+        .flipped = false,
+    };
+    vid_target.repr.bits = (struct pl_bit_encoding) {0};
+    vid_target.overlays = NULL;
+    vid_target.num_overlays = 0;
+
+    if (!pl_render_image_mix(p->rr, mix, &vid_target, params))
+        return false;
+
+    float ui_ref = ref_luma > 0.0f ? ref_luma : PL_COLOR_SDR_WHITE;
+
+    struct pl_frame osd_target = {
+        .repr = pl_color_repr_rgb,
+        .num_planes = 1,
+        .planes[0] = {
+            .texture = p->edr_osd_tex,
+            .components = 4,
+            .component_mapping = {0, 1, 2, 3},
+            .flipped = false,
+        },
+        .color = {
+            .primaries = PL_COLOR_PRIM_BT_2020,
+            .transfer  = PL_COLOR_TRC_GAMMA22,
+            .hdr = {
+                .max_luma = ui_ref,
+            },
+        },
+        .crop = vid_target.crop,
+        .rotation = vid_target.rotation,
+        .overlays = render_target->overlays,
+        .num_overlays = render_target->num_overlays,
+    };
+    struct pl_render_params osd_params = pl_render_default_params;
+    osd_params.background = PL_CLEAR_COLOR;
+    osd_params.border = PL_CLEAR_COLOR;
+    osd_params.background_transparency = 1.0f;
+    osd_params.dither_params = NULL;
+    osd_params.error_diffusion = NULL;
+    osd_params.info_callback = NULL;
+
+    if (!pl_render_image(p->edr_osd_rr, NULL, &osd_target, &osd_params))
+        return false;
+
+    pl_fmt uv_fmt = pl_find_vertex_fmt(gpu, PL_FMT_FLOAT, 2);
+    if (!uv_fmt)
+        return false;
+
+    float u1 = (float)dst_w / (float)tex_w;
+    float v1 = (float)dst_h / (float)tex_h;
+    float uvs[4][2] = {
+        { 0.0f, dst_flipped ? v1 : 0.0f },
+        { u1,   dst_flipped ? v1 : 0.0f },
+        { 0.0f, dst_flipped ? 0.0f : v1 },
+        { u1,   dst_flipped ? 0.0f : v1 },
+    };
+    const struct pl_shader_va uv_va = {
+        .attr = {
+            .name = "edr_uv",
+            .fmt = uv_fmt,
+        },
+        .data = { &uvs[0], &uvs[1], &uvs[2], &uvs[3] },
+    };
+    const struct pl_shader_desc descs[2] = {
+        {
+            .desc = {
+                .name = "edr_vid_tex",
+                .type = PL_DESC_SAMPLED_TEX,
+            },
+            .binding = {
+                .object = p->edr_video_tex,
+                .address_mode = PL_TEX_ADDRESS_CLAMP,
+                .sample_mode = PL_TEX_SAMPLE_NEAREST,
+            },
+        },
+        {
+            .desc = {
+                .name = "edr_osd_tex",
+                .type = PL_DESC_SAMPLED_TEX,
+            },
+            .binding = {
+                .object = p->edr_osd_tex,
+                .address_mode = PL_TEX_ADDRESS_CLAMP,
+                .sample_mode = PL_TEX_SAMPLE_NEAREST,
+            },
+        },
+    };
+    const struct pl_shader_var ref_var = {
+        .var = pl_var_float("edr_ref_nits"),
+        .data = &ui_ref,
+        .dynamic = true,
+    };
+
+    static const char composite_body[] =
+        "vec4 vid = textureLod(edr_vid_tex, edr_uv, 0.0);\n"
+        "vec4 osd = textureLod(edr_osd_tex, edr_uv, 0.0);\n"
+        "if (osd.a <= (1.0 / 4096.0)) {\n"
+        "    color = vid;\n"
+        "} else {\n"
+        "    vec3 pq = clamp(vid.rgb, vec3(0.0), vec3(1.0));\n"
+        "    vec3 p = pow(max(pq, vec3(1e-12)), vec3(1.0 / 78.84375)) * step(vec3(1e-12), pq);\n"
+        "    vec3 num = max(p - vec3(0.8359375), vec3(0.0));\n"
+        "    vec3 den = max(vec3(18.8515625) - vec3(18.6875) * p, vec3(1e-6));\n"
+        "    vec3 ratio = num / den;\n"
+        "    vec3 nits = 10000.0 * pow(max(ratio, vec3(1e-12)), vec3(1.0 / 0.1593017578125)) * step(vec3(1e-12), ratio);\n"
+        "    float ref_nits = max(edr_ref_nits, 1.0);\n"
+        "    vec3 rel = max(nits / ref_nits, vec3(0.0));\n"
+        "    vec3 vid_g = pow(max(rel, vec3(1e-12)), vec3(1.0 / 2.2)) * step(vec3(1e-12), rel);\n"
+        "    float inv_a = 1.0 - clamp(osd.a, 0.0, 1.0);\n"
+        "    vec3 out_g = max(osd.rgb + inv_a * vid_g, vec3(0.0));\n"
+        "    vec3 out_nits = ref_nits * pow(max(out_g, vec3(1e-12)), vec3(2.2)) * step(vec3(1e-12), out_g);\n"
+        "    vec3 y = clamp(out_nits / 10000.0, vec3(0.0), vec3(1.0));\n"
+        "    vec3 ym = pow(max(y, vec3(1e-12)), vec3(0.1593017578125)) * step(vec3(1e-12), y);\n"
+        "    vec3 pq_out = pow(clamp((vec3(0.8359375) + vec3(18.8515625) * ym)\n"
+        "                            / (vec3(1.0) + vec3(18.6875) * ym),\n"
+        "                            vec3(0.0), vec3(1.0)),\n"
+        "                      vec3(78.84375)) * step(vec3(1e-12), y);\n"
+        "    color = vec4(pq_out, vid.a);\n"
+        "}\n";
+
+    pl_dispatch_reset_frame(p->edr_osd_dp);
+    pl_shader sh = pl_dispatch_begin(p->edr_osd_dp);
+    if (!pl_shader_custom(sh, &(struct pl_custom_shader) {
+            .description = "macOS EDR Gamma-2.2 OSD composite",
+            .body = composite_body,
+            .input = PL_SHADER_SIG_NONE,
+            .output = PL_SHADER_SIG_COLOR,
+            .descriptors = descs,
+            .num_descriptors = 2,
+            .variables = &ref_var,
+            .num_variables = 1,
+            .vertex_attribs = &uv_va,
+            .num_vertex_attribs = 1,
+        }))
+    {
+        pl_dispatch_abort(p->edr_osd_dp, &sh);
+        return false;
+    }
+
+    return pl_dispatch_finish(p->edr_osd_dp, pl_dispatch_params(
+        .shader = &sh,
+        .target = dst_fbo,
+    ));
+}
+#endif
+
 static bool update_overlays(struct mppl_video *p, struct mp_osd_res res,
                             int flags, enum pl_overlay_coords coords,
                             struct overlay_state *state, struct pl_frame *frame,
-                            struct mp_image *src, int stereo_mode, float ref_luma)
+                            struct mp_image *src, int stereo_mode,
+                            float ref_luma, bool edr_hook_active)
 {
     double pts = src ? src->pts : 0;
     int div[2];
@@ -542,7 +1043,8 @@ static bool update_overlays(struct mppl_video *p, struct mp_osd_res res,
         prev_active[i] = state->entries[i].active;
         state->entries[i].active = false;
     }
-    bool changed = false;
+    bool changed = fabsf(state->last_ref_luma - ref_luma) > 0.5f;
+    state->last_ref_luma = ref_luma;
     state->num_overlays = 0;
 
     for (int n = 0; n < subs->num_items; n++) {
@@ -571,8 +1073,8 @@ static bool update_overlays(struct mppl_video *p, struct mp_osd_res res,
             if (b->dw == 0 || b->dh == 0)
                 continue;
             struct pl_color_space part_color = item->format == SUBBITMAP_BGRA
-                                    ? bgra_overlay_color(p, item, b, src, ref_luma)
-                                    : libass_overlay_color(p, item, src, ref_luma);
+                                    ? bgra_overlay_color(p, item, b, src, ref_luma, coords, &frame->color, edr_hook_active)
+                                    : libass_overlay_color(p, item, src, ref_luma, coords, &frame->color, edr_hook_active);
             // Emit pl_overlay per each distinct colorspace run
             if (start >= 0 && !pl_color_space_equal(&color, &part_color)) {
                 int run_idx = state->num_overlays;
@@ -1501,7 +2003,17 @@ enum mppl_video_hint mppl_video_get_target_hint(struct mppl_video *p, struct vo_
         // libplacebo defaults to 1000:1 contrast ratio otherwise.
         if (!hint.hdr.min_luma)
             hint.hdr.min_luma = target->hdr.min_luma;
-        if (p->next_opts->target_hint_mode == 0) {
+#if HAVE_COCOA
+        // macOS uses per-layer opt-in EDR on an SDR desktop; keep SDR sources
+        // in SDR unless HDR output or inverse tone-mapping was explicitly requested.
+        bool macvk_sdr_source = p->ra_ctx && p->ra_ctx->fns &&
+                                strcmp(p->ra_ctx->fns->name, "macvk") == 0 &&
+                                !pl_color_transfer_is_hdr(source->transfer) &&
+                                !opts->tone_map.inverse && !opts->target_trc;
+#else
+        bool macvk_sdr_source = false;
+#endif
+        if (p->next_opts->target_hint_mode == 0 && !macvk_sdr_source) {
             hint = *target;
             if (pl_color_transfer_is_hdr(hint.transfer) && !pl_primaries_valid(&hint.hdr.prim))
                 pl_color_space_merge(&hint, source);
@@ -1598,6 +2110,14 @@ enum mppl_video_hint mppl_video_get_target_hint(struct mppl_video *p, struct vo_
         return MPPL_VIDEO_HINT_SET;
     }
 
+#if HAVE_COCOA
+    if (target_hint && p->ra_ctx && p->ra_ctx->fns &&
+        strcmp(p->ra_ctx->fns->name, "macvk") == 0) {
+        // Release macOS per-layer EDR when returning to idle with no video frame
+        return MPPL_VIDEO_HINT_NONE;
+    }
+#endif
+
     return target_hint ? MPPL_VIDEO_HINT_KEEP : MPPL_VIDEO_HINT_NONE;
 }
 
@@ -1636,6 +2156,11 @@ bool mppl_video_render_frame(struct mppl_video *p, struct vo_frame *frame,
     struct pl_render_params params = fpar.params;
     bool can_interpolate = fpar.can_interpolate;
     double pts_offset = fpar.pts_offset;
+
+#if HAVE_COCOA
+    if (p->ra_ctx && p->ra_ctx->swapchain && p->ra_ctx->swapchain->fns->target_ref_luma)
+        p->display_ref_luma = p->ra_ctx->swapchain->fns->target_ref_luma(p->ra_ctx->swapchain);
+#endif
 
     bool target_unknown;
     float target_ref_luma;
@@ -1696,11 +2221,33 @@ bool mppl_video_render_frame(struct mppl_video *p, struct vo_frame *frame,
             target.color.transfer = PL_COLOR_TRC_SRGB;
 #endif
     }
+#if HAVE_COCOA
+    bool edr_active = is_macvk_edr(p, &target.color);
+    float edr_sys_ref = edr_active ? p->display_ref_luma : 0.0f;
+    bool edr_ref_mode = edr_active && edr_sys_ref > 0.0f && edr_sys_ref <= 105.0f;
+    float edr_peak_nits = edr_active ? MPMAX(target.color.hdr.max_luma, PL_COLOR_SDR_WHITE) : 0.0f;
+    bool edr_use_hook = edr_active && opts->tone_map.curve == TONE_MAPPING_AUTO;
+    if ((edr_use_hook && (!p->mac_edr.active || p->mac_edr.ref_mode != edr_ref_mode)) ||
+        (!edr_use_hook && p->mac_edr.active))
+    {
+        pl_renderer_flush_cache(p->rr);
+    }
+    p->mac_edr.active = edr_use_hook;
+    p->mac_edr.peak_nits = edr_peak_nits;
+    p->mac_edr.ref_mode = edr_ref_mode;
+    if (!edr_active && (p->edr_video_tex || p->edr_osd_tex)) {
+        pl_tex_destroy(gpu, &p->edr_video_tex);
+        pl_tex_destroy(gpu, &p->edr_osd_tex);
+    }
+#else
+    bool edr_use_hook = false;
+#endif
     stats_time_start(p->stats, "osd-update");
     update_overlays(p, p->osd_res,
                     (frame->current && opts->blend_subs) ? OSD_DRAW_OSD_ONLY : 0,
                     PL_OVERLAY_COORDS_DST_FRAME, &p->osd_state, &target, frame->current,
-                    frame->current ? frame->current->params.stereo3d : 0, get_ref_luma(p));
+                    frame->current ? frame->current->params.stereo3d : 0,
+                    get_ref_luma(p), edr_use_hook);
     stats_time_end(p->stats, "osd-update");
     apply_crop(&target, p->dst, swframe->fbo->params.w, swframe->fbo->params.h);
     update_tm_viz(&pars->color_map_params, &target);
@@ -1757,6 +2304,17 @@ bool mppl_video_render_frame(struct mppl_video *p, struct vo_frame *frame,
             if (opts->blend_subs) {
                 if (!p->osd_sync)
                     p->osd_sync = 1;
+                enum pl_overlay_coords rel = opts->blend_subs == BLEND_SUBS_VIDEO
+                    ? PL_OVERLAY_COORDS_SRC_CROP : PL_OVERLAY_COORDS_DST_CROP;
+                float sub_ref_luma = get_ref_luma(p);
+#if HAVE_COCOA
+                if (edr_use_hook)
+                    sub_ref_luma = mac_edr_adjust_sub_peak(p, 100.0f, rel, &image->color);
+                if (fabsf(p->last_sub_ref_luma - sub_ref_luma) > 0.5f) {
+                    p->last_sub_ref_luma = sub_ref_luma;
+                    p->osd_sync++;
+                }
+#endif
                 if (frame->redraw || fp->osd_sync < p->osd_sync) {
                     float w = pl_rect_w(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target.crop);
                     float h = pl_rect_h(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target.crop);
@@ -1771,12 +2329,11 @@ bool mppl_video_render_frame(struct mppl_video *p, struct vo_frame *frame,
                         .mb = (image->crop.y1 - p->image_params.h) * ry,
                         .display_par = 1.0,
                     };
-                    enum pl_overlay_coords rel = opts->blend_subs == BLEND_SUBS_VIDEO
-                        ? PL_OVERLAY_COORDS_SRC_CROP : PL_OVERLAY_COORDS_DST_CROP;
                     stats_time_start(p->stats, "osd-blend-update");
                     bool subs_changed = update_overlays(p, res, OSD_DRAW_SUB_ONLY,
                                                         rel, &fp->subs, image, mpi,
-                                                        mpi->params.stereo3d, get_ref_luma(p));
+                                                        mpi->params.stereo3d,
+                                                        sub_ref_luma, edr_use_hook);
                     stats_time_end(p->stats, "osd-blend-update");
                     if (frame->redraw && subs_changed)
                         p->osd_sync++;
@@ -1804,8 +2361,63 @@ bool mppl_video_render_frame(struct mppl_video *p, struct vo_frame *frame,
     }
 
     // Render frame
+    struct pl_frame render_target = target;
+#if HAVE_COCOA
+    struct pl_color_map_params edr_cmap;
+    if (edr_active) {
+        edr_cmap = params.color_map_params ? *params.color_map_params : pars->color_map_params;
+        if (opts->tone_map.curve == TONE_MAPPING_AUTO)
+            edr_cmap.tone_mapping_function = &pl_tone_map_clip;
+        if (opts->tone_map.gamut_mode == GAMUT_AUTO)
+            edr_cmap.gamut_mapping = &pl_gamut_map_clip;
+        edr_cmap.mastering_clip = 0.0f;
+        params.color_map_params = &edr_cmap;
+        if (opts->tone_map.compute_peak == 0)
+            params.peak_detect_params = NULL;
+
+        if (edr_use_hook) {
+            // Keep full [0..10000] nit PQ headroom through pl_shader_color_map so
+            // 4000/10000-nit masters are not hard-clipped at display_peak before
+            // mac_edr_hook's smooth highlight shoulder runs.
+            if (render_target.color.transfer == PL_COLOR_TRC_PQ) {
+                render_target.color.hdr.max_luma = 10000.0f;
+                render_target.color.hdr.max_cll  = 10000.0f;
+            }
+            p->mac_edr_hook_inst = (struct pl_hook) {
+                .stages    = PL_HOOK_PRE_OUTPUT,
+                .input     = PL_HOOK_SIG_COLOR,
+                .priv      = p,
+                .hook      = mac_edr_hook_fn,
+                .signature = 0x6d70766564723231ULL,
+            };
+            int n = params.num_hooks;
+            MP_TARRAY_GROW(p, p->edr_hooks, n + 1);
+            if (n > 0)
+                memcpy(p->edr_hooks, params.hooks, n * sizeof(p->edr_hooks[0]));
+            p->edr_hooks[n] = &p->mac_edr_hook_inst;
+            params.hooks = p->edr_hooks;
+            params.num_hooks = n + 1;
+        }
+    }
+#endif
     stats_time_start(p->stats, "render");
-    bool render_ok = pl_render_image_mix(p->rr, &mix, &target, &params);
+    bool render_ok = false;
+#if HAVE_COCOA
+    if (edr_active && !p->live_resize &&
+        render_target.color.transfer == PL_COLOR_TRC_PQ &&
+        render_target.num_planes == 1 && render_target.num_overlays > 0 &&
+        swframe->fbo)
+    {
+        render_ok = mac_edr_render_srgb_osd(p, &mix, &render_target, &params,
+                                            swframe->fbo,
+                                            render_target.planes[0].flipped,
+                                            get_ref_luma(p));
+        if (!render_ok)
+            MP_WARN(p, "EDR Gamma-2.2 OSD composite failed, falling back.\n");
+    }
+#endif
+    if (!render_ok)
+        render_ok = pl_render_image_mix(p->rr, &mix, &render_target, &params);
     stats_time_end(p->stats, "render");
     if (!render_ok) {
         MP_ERR(p, "Failed rendering frame!\n");
@@ -2059,12 +2671,13 @@ void mppl_video_screenshot(struct mppl_video *p, struct voctrl_screenshot *args)
             ? PL_OVERLAY_COORDS_SRC_CROP : PL_OVERLAY_COORDS_DST_CROP;
         update_overlays(p, res, osd_flags,
                         rel, &fp->subs, &image, mpi,
-                        mpi->params.stereo3d, 0);
+                        mpi->params.stereo3d, 0, false);
+        fp->osd_sync = 0;
     } else {
         // Disable overlays when blend_subs is disabled
         update_overlays(p, osd, osd_flags, PL_OVERLAY_COORDS_DST_FRAME,
                         &p->osd_state, &target, mpi,
-                        mpi->params.stereo3d, 0);
+                        mpi->params.stereo3d, 0, false);
         image.num_overlays = 0;
     }
 
@@ -2415,6 +3028,12 @@ void mppl_video_uninit(struct mppl_video *p)
         pl_tex_destroy(p->gpu, &p->sub_tex[i]);
     for (int i = 0; i < p->num_user_hooks; i++)
         pl_mpv_user_shader_destroy(&p->user_hooks[i].hook);
+#if HAVE_COCOA
+    pl_tex_destroy(p->gpu, &p->edr_video_tex);
+    pl_tex_destroy(p->gpu, &p->edr_osd_tex);
+    pl_dispatch_destroy(&p->edr_osd_dp);
+    pl_renderer_destroy(&p->edr_osd_rr);
+#endif
 
     timer_pool_destroy(p->sw_upload_timer);
 

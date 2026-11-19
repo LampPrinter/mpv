@@ -15,6 +15,8 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <math.h>
+
 #import <QuartzCore/QuartzCore.h>
 
 #include "video/out/gpu/context.h"
@@ -62,6 +64,104 @@ static bool mac_vk_check_visible(struct ra_ctx *ctx)
     return [p->vo_mac isVisible];
 }
 
+static pl_color_space_t mac_vk_preferred_csp(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    float max_pot_edr = [p->vo_mac maxPotentialEDR];
+    if (max_pot_edr > 1.01f) {
+        float display_peak = MPMAX(max_pot_edr * 100.0f, PL_COLOR_SDR_WHITE);
+        return (pl_color_space_t) {
+            .primaries = PL_COLOR_PRIM_BT_2020,
+            .transfer  = PL_COLOR_TRC_PQ,
+            .hdr = {
+                .min_luma = 0.0001f,
+                .max_luma = display_peak,
+            },
+        };
+    }
+    return (pl_color_space_t) {
+        .primaries = PL_COLOR_PRIM_DISPLAY_P3,
+        .transfer  = PL_COLOR_TRC_SRGB,
+        .hdr = {
+            .max_luma = PL_COLOR_SDR_WHITE,
+        },
+    };
+}
+
+static float mac_vk_preferred_ref_luma(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    if (![p->vo_mac isHDRActive])
+        return 0.0f;
+
+    if ([p->vo_mac maxReferenceEDR] > 0.01f)
+        return 100.0f;
+
+    float max_pot = [p->vo_mac maxPotentialEDR];
+    float cur_max = [p->vo_mac currentMaxEDR];
+    if (max_pot <= 1.01f || cur_max <= 0.01f)
+        return 206.0f;
+
+    // Estimate current macOS SDR white in nits (e.g. 200 nits at maxEDR=8, 600 nits at maxEDR=2.67)
+    // and compensate for CoreAnimation CAEDRMetadata.hdr10's headroom roll-off so SDR UI matches 1.0 SDR white.
+    float sdr_ratio = MPCLAMP((max_pot * 100.0f) / (MPMAX(cur_max, 1.0f) * PL_COLOR_SDR_WHITE), 1.0f, 3.0f);
+    float luma = 206.0f * powf(sdr_ratio, 0.35f);
+    return roundf(luma * 0.1f) * 10.0f;
+}
+
+static bool mac_vk_set_color(struct ra_ctx *ctx, struct mp_image_params *params)
+{
+    struct priv *p = ctx->priv;
+    if (!params || !pl_color_transfer_is_hdr(params->color.transfer)) {
+        [p->vo_mac updateHDRStateWithActive:NO isHLG:NO minLuma:0.0f maxLuma:0.0f];
+        return false;
+    }
+
+    float max_pot_edr = [p->vo_mac maxPotentialEDR];
+    if (max_pot_edr <= 1.01f) {
+        // Current screen is SDR-only: disable EDR and let libplacebo tone-map to Display P3 SDR
+        [p->vo_mac updateHDRStateWithActive:NO isHLG:NO minLuma:0.0f maxLuma:0.0f];
+        params->color = (struct pl_color_space) {
+            .primaries = PL_COLOR_PRIM_DISPLAY_P3,
+            .transfer  = PL_COLOR_TRC_SRGB,
+            .hdr = {
+                .max_luma = PL_COLOR_SDR_WHITE,
+            },
+        };
+        pl_swapchain_colorspace_hint(p->vk.swapchain, &params->color);
+        return true;
+    }
+
+    // Output flicker-free 10-bit BT.2100 PQ (VK_FORMAT_A2R10G10B10_UNORM_PACK32 +
+    // VK_COLOR_SPACE_HDR10_ST2084_EXT -> bgr10a2Unorm + kCGColorSpaceITUR_2100_PQ)
+    // with static display peak luminance so libplacebo avoids per-scene 3D-LUT compression.
+    float display_peak = MPMAX(max_pot_edr * 100.0f, PL_COLOR_SDR_WHITE);
+    if (params->color.transfer == PL_COLOR_TRC_PQ ||
+        params->color.transfer == PL_COLOR_TRC_HLG)
+    {
+        [p->vo_mac updateHDRStateWithActive:YES
+                                      isHLG:NO
+                                    minLuma:0.0001f
+                                    maxLuma:display_peak];
+
+        params->color = (struct pl_color_space) {
+            .primaries = PL_COLOR_PRIM_BT_2020,
+            .transfer  = PL_COLOR_TRC_PQ,
+            .hdr = {
+                .min_luma = 0.0001f,
+                .max_luma = display_peak,
+                .max_cll  = display_peak,
+            },
+        };
+        pl_swapchain_colorspace_hint(p->vk.swapchain, &params->color);
+        return true;
+    }
+
+    // User explicitly forced another HDR transfer (e.g. scrgb): keep active
+    [p->vo_mac updateHDRStateWithActive:YES isHLG:NO minLuma:0.0001f maxLuma:display_peak];
+    return false;
+}
+
 static bool mac_vk_init(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
@@ -91,6 +191,9 @@ static bool mac_vk_init(struct ra_ctx *ctx)
         .swap_buffers = mac_vk_swap_buffers,
         .get_vsync = mac_vk_get_vsync,
         .color_depth = mac_vk_color_depth,
+        .preferred_csp = mac_vk_preferred_csp,
+        .preferred_ref_luma = mac_vk_preferred_ref_luma,
+        .set_color = mac_vk_set_color,
         .check_visible = mac_vk_check_visible,
     };
 

@@ -72,12 +72,14 @@ class MacCommon: Common {
 
             windowDidResize()
             updateICCProfile()
+            _ = updateEDRState()
         }
 
         return true
     }
 
     @objc func prepareUninit() {
+        layer?.invalidateEDRSync()
         swapLock.lock()
         swapQuitting = true
         swapTime += 1
@@ -96,6 +98,7 @@ class MacCommon: Common {
     }
 
     override func prepareForQuit() {
+        layer?.invalidateEDRSync()
         layer?.disableDisplaySyncForQuit()
         swapLock.lock()
         swapQuitting = true
@@ -112,6 +115,7 @@ class MacCommon: Common {
         timer?.terminate()
 
         DispatchQueue.main.sync {
+            layer?.invalidateEDRSync()
             window?.delegate = nil
             window?.close()
 
@@ -155,6 +159,31 @@ class MacCommon: Common {
             window?.isOpaque = !alpha
             window?.backgroundColor = alpha ? NSColor.clear : NSColor.black
         }
+    }
+
+    @objc(maxPotentialEDR)
+    func maxPotentialEDR() -> Float {
+        return edrLock.withLock { cachedMaxPotentialEDR }
+    }
+
+    @objc(currentMaxEDR)
+    func currentMaxEDR() -> Float {
+        return edrLock.withLock { cachedMaxEDR }
+    }
+
+    @objc(maxReferenceEDR)
+    func maxReferenceEDR() -> Float {
+        return edrLock.withLock { cachedMaxRefEDR }
+    }
+
+    @objc(isHDRActive)
+    func isHDRActive() -> Bool {
+        return layer?.isHDRActive() ?? false
+    }
+
+    @objc(updateHDRStateWithActive:isHLG:minLuma:maxLuma:)
+    func updateHDRState(active: Bool, isHLG: Bool, minLuma: Float, maxLuma: Float) {
+        layer?.updateHDRState(active: active, isHLG: isHLG, minLuma: minLuma, maxLuma: maxLuma)
     }
 
     override func displayLinkCallback(_ displayLink: CVDisplayLink,
@@ -205,6 +234,10 @@ class MacCommon: Common {
     }
 
     override func windowDidChangeScreenProfile() {
+        let ev = updateEDRState()
+        if ev != 0 {
+            flagEvents(ev)
+        }
         updateICCProfile()
     }
 
